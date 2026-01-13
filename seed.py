@@ -105,47 +105,52 @@ def seed_sample_cases(db: Session) -> bool:
     cases_data = [
         {
             "case_uid": "CASE-001",
+            "original_name": "김철수_20250113_liver",
             "display_name": "Patient A - Liver CT",
             "hospital": "Seoul National Hospital",
             "slice_thickness_mm": 1.0,
             "part": "Liver",
-            "difficulty": Difficulty.LOW,
+            "difficulty": Difficulty.EASY,
             "assigned_user": worker1,
         },
         {
             "case_uid": "CASE-002",
+            "original_name": "박영희_abdomen_CT_01",
             "display_name": "Patient B - Kidney MRI",
             "hospital": "Severance Hospital",
             "slice_thickness_mm": 2.0,
             "part": "Kidney",
-            "difficulty": Difficulty.MID,
+            "difficulty": Difficulty.NORMAL,
             "assigned_user": worker1,
         },
         {
             "case_uid": "CASE-003",
+            "original_name": "이민호_spine_2025_v2",
             "display_name": "Patient C - Spine CT",
             "hospital": "Asan Medical Center",
             "slice_thickness_mm": 1.5,
             "part": "Spine",
-            "difficulty": Difficulty.HIGH,
+            "difficulty": Difficulty.HARD,
             "assigned_user": worker2,
         },
         {
             "case_uid": "CASE-004",
+            "original_name": "최지원_liver_CT_20250110",
             "display_name": "Patient D - Liver CT",
             "hospital": "Samsung Medical Center",
             "slice_thickness_mm": 1.0,
             "part": "Liver",
-            "difficulty": Difficulty.MID,
+            "difficulty": Difficulty.NORMAL,
             "assigned_user": None,  # Unassigned
         },
         {
             "case_uid": "CASE-005",
+            "original_name": "정수연_kidney_MRI_final",
             "display_name": "Patient E - Kidney CT",
             "hospital": "Korea University Hospital",
             "slice_thickness_mm": 2.5,
             "part": "Kidney",
-            "difficulty": Difficulty.LOW,
+            "difficulty": Difficulty.EASY,
             "assigned_user": worker2,
         },
     ]
@@ -154,6 +159,7 @@ def seed_sample_cases(db: Session) -> bool:
     for data in cases_data:
         case = Case(
             case_uid=data["case_uid"],
+            original_name=data.get("original_name"),
             display_name=data["display_name"],
             hospital=data["hospital"],
             slice_thickness_mm=data["slice_thickness_mm"],
@@ -189,16 +195,21 @@ def seed_sample_cases(db: Session) -> bool:
         if data["case_uid"] == "CASE-001":
             autoqc = AutoQcSummary(
                 case_id=case.id,
-                qc_pass=False,
+                status="WARN",  # qc_pass=False -> status="WARN"
                 missing_segments_json=json.dumps(["hepatic_vein"]),
                 geometry_mismatch=True,
                 warnings_json=json.dumps(["fragmented_vessel_detected", "artery_vein_contact"]),
+                issues_json=json.dumps([
+                    {"code": "MISSING_REQUIRED", "level": "WARN", "segment": "hepatic_vein", "message": "필수 세그먼트 누락"},
+                    {"code": "CONTACT", "level": "WARN", "segment": "Aorta, IVC", "message": "혈관 접촉 감지"},
+                ]),
+                issue_count_json=json.dumps({"warn_level": 2, "incomplete_level": 0}),
             )
             db.add(autoqc)
         elif data["case_uid"] == "CASE-002":
             autoqc = AutoQcSummary(
                 case_id=case.id,
-                qc_pass=True,
+                status="PASS",  # qc_pass=True -> status="PASS"
                 missing_segments_json=None,
                 geometry_mismatch=False,
                 warnings_json=None,
@@ -222,7 +233,7 @@ def seed_app_config(db: Session) -> bool:
         "workday_hours": 8,
         "wip_limit": 1,
         "auto_timeout_minutes": 120,
-        "difficulty_weights": {"LOW": 1.0, "MID": 1.5, "HIGH": 2.0},
+        "difficulty_weights": {"EASY": 1.0, "NORMAL": 1.5, "HARD": 2.0, "VERY_HARD": 2.5},
     }
 
     created = []

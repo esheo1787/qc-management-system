@@ -34,6 +34,8 @@ from schemas import (
     EventResponse,
     HolidayListResponse,
     HolidayUpdateRequest,
+    PreQcSummaryCreateRequest,
+    PreQcSummaryResponse,
     ProjectDefinitionLinkRequest,
     ProjectDefinitionLinkResponse,
     ProjectDefinitionListResponse,
@@ -75,6 +77,7 @@ from services import (
     get_all_tags,
     get_all_timeoffs,
     get_autoqc_summary,
+    get_preqc_summary,
     get_case_detail,
     get_case_detail_with_metrics,
     get_cases_by_tag,
@@ -95,6 +98,7 @@ from services import (
     remove_holiday,
     remove_tags,
     save_autoqc_summary,
+    save_preqc_summary,
     submit_case,
     update_holidays,
 )
@@ -461,6 +465,40 @@ def get_capacity_metrics(
     Includes workdays, available hours, actual hours, and utilization rate.
     """
     return get_team_capacity(db, start_date, end_date)
+
+
+# ============================================================
+# PreQC Summary Endpoints
+# ============================================================
+
+@router.post("/api/preqc_summary", response_model=PreQcSummaryResponse)
+def save_preqc(
+    request: PreQcSummaryCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Save Pre-QC summary from local client.
+    NOTE: Server does NOT run Pre-QC. It only stores the summary.
+    Actual QC runs on local PC (offline-first, cost=0).
+    """
+    try:
+        return save_preqc_summary(db, request, current_user)
+    except ServiceError as e:
+        handle_service_error(e)
+
+
+@router.get("/api/preqc_summary/{case_id}", response_model=PreQcSummaryResponse)
+def get_preqc(
+    case_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get Pre-QC summary for a case."""
+    result = get_preqc_summary(db, case_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"PreQC summary not found for case {case_id}")
+    return result
 
 
 # ============================================================

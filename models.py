@@ -45,16 +45,33 @@ class CaseStatus(str, PyEnum):
 
 
 class EventType(str, PyEnum):
+    # 작업자 상태 변경
     STARTED = "STARTED"
     SUBMITTED = "SUBMITTED"
     REWORK_REQUESTED = "REWORK_REQUESTED"
     ACCEPTED = "ACCEPTED"
 
+    # 어드민 액션
+    ASSIGN = "ASSIGN"  # 케이스 배정
+    REASSIGN = "REASSIGN"  # 재배정
+    REJECT = "REJECT"  # 검수 반려 (REWORK_REQUESTED와 별도)
+
+    # 작업자 피드백 액션
+    FEEDBACK_CREATED = "FEEDBACK_CREATED"
+    FEEDBACK_UPDATED = "FEEDBACK_UPDATED"
+    FEEDBACK_DELETED = "FEEDBACK_DELETED"
+    FEEDBACK_SUBMIT = "FEEDBACK_SUBMIT"  # QC 피드백 제출 (제출 버튼과 함께)
+
+    # 작업자 기타 액션
+    CANCEL = "CANCEL"  # 작업 취소
+    EDIT = "EDIT"  # 정보 수정
+
 
 class Difficulty(str, PyEnum):
-    LOW = "LOW"
-    MID = "MID"
-    HIGH = "HIGH"
+    EASY = "EASY"
+    NORMAL = "NORMAL"
+    HARD = "HARD"
+    VERY_HARD = "VERY_HARD"
 
 
 class ActionType(str, PyEnum):
@@ -101,6 +118,9 @@ class User(Base):
     worker_qc_feedbacks: Mapped[list["WorkerQcFeedback"]] = relationship(
         "WorkerQcFeedback", back_populates="user"
     )
+    reviewer_qc_feedbacks: Mapped[list["ReviewerQcFeedback"]] = relationship(
+        "ReviewerQcFeedback", back_populates="reviewer"
+    )
 
 
 class Project(Base):
@@ -133,8 +153,9 @@ class Case(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     case_uid: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
-    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    nas_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)  # 하위 호환용
+    original_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)  # 원본 폴더명
+    nas_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # 폴더 경로
     hospital: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     slice_thickness_mm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
@@ -146,7 +167,7 @@ class Case(Base):
     )
 
     difficulty: Mapped[Difficulty] = mapped_column(
-        Enum(Difficulty), default=Difficulty.MID, nullable=False
+        Enum(Difficulty), default=Difficulty.NORMAL, nullable=False
     )
     status: Mapped[CaseStatus] = mapped_column(
         Enum(CaseStatus), default=CaseStatus.TODO, nullable=False
@@ -158,6 +179,11 @@ class Case(Base):
     )
 
     metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 추가 필드
+    wwl: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # Window Width/Level (예: "350/40")
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 작업자 메모
+    tags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON 배열 (예: '["원본", "카데바"]')
 
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -199,6 +225,9 @@ class Case(Base):
     worker_qc_feedbacks: Mapped[list["WorkerQcFeedback"]] = relationship(
         "WorkerQcFeedback", back_populates="case", order_by="WorkerQcFeedback.created_at"
     )
+    reviewer_qc_feedbacks: Mapped[list["ReviewerQcFeedback"]] = relationship(
+        "ReviewerQcFeedback", back_populates="case", order_by="ReviewerQcFeedback.created_at"
+    )
 
 
 class PreQcSummary(Base):
@@ -208,9 +237,37 @@ class PreQcSummary(Base):
     case_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("cases.id"), unique=True, nullable=False
     )
-    flags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 기본 정보
+    folder_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     slice_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    spacing_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # [x, y, z]
+    volume_file: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # 슬라이스 두께
+    slice_thickness_mm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    slice_thickness_flag: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # OK, WARN, THICK
+
+    # 노이즈
+    noise_sigma_mean: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    noise_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # LOW, MODERATE, HIGH
+
+    # 조영제
+    delta_hu: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    contrast_flag: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # GOOD, BORDERLINE, POOR
+
+    # 혈관 가시성
+    vessel_voxel_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    edge_strength: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vascular_visibility_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 0~5
+    vascular_visibility_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # EXCELLENT, USABLE, BORDERLINE, POOR
+
+    # 기타
+    difficulty: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # EASY, NORMAL, HARD, VERY_HARD
+    flags_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     expected_segments_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_kst, nullable=False
     )
@@ -327,6 +384,11 @@ class AutoQcSummary(Base):
     """
     Auto-QC summary from local client.
     Server only stores the summary - actual QC runs on local PC.
+
+    status: "PASS" | "WARN" | "INCOMPLETE"
+      - PASS: 문제 없음
+      - WARN: 경미한 문제, 재작업 필요
+      - INCOMPLETE: 심각한 문제, 재작업 필요 + 작업자 평가 반영
     """
     __tablename__ = "autoqc_summaries"
 
@@ -334,10 +396,25 @@ class AutoQcSummary(Base):
     case_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("cases.id"), unique=True, nullable=False
     )
-    qc_pass: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default=None)
+
+    # 세그먼트 관련
     missing_segments_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    name_mismatches_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    extra_segments_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 이슈 관련
+    issues_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    issue_count_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 기존 필드 (하위 호환)
     geometry_mismatch: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     warnings_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 수정 추적
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # QC 실행 횟수
+    previous_issue_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 이전 총 이슈 수
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_kst, nullable=False
     )
@@ -424,10 +501,13 @@ class ProjectDefinitionLink(Base):
 class WorkerQcFeedback(Base):
     """
     Worker feedback on Auto-QC results.
-    Workers can report if QC results are incorrect and describe additional fixes.
-    Submitted before case submission.
+    Workers can report QC issue fixes, additional fixes, and memos.
+    One feedback per case per worker (upsert pattern).
     """
     __tablename__ = "worker_qc_feedbacks"
+    __table_args__ = (
+        UniqueConstraint("case_id", "user_id", name="uq_case_worker_feedback"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     case_id: Mapped[int] = mapped_column(
@@ -436,14 +516,76 @@ class WorkerQcFeedback(Base):
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id"), nullable=False
     )
+
+    # QC 이슈 수정 여부 (issues_json 파싱해서 각 이슈별 체크)
+    # [{"issue_id": 1, "segment": "IVC", "code": "SEGMENT_NAME_MISMATCH", "fixed": true}]
+    qc_fixes_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 추가 수정 사항 (QC에 없지만 수정한 것)
+    # [{"segment": "Renal_Artery", "description": "구멍 메움"}]
+    additional_fixes_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 메모
+    memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 하위 호환 필드 (기존 feedback)
     qc_result_error: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )  # True if worker thinks QC result is wrong
     feedback_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_kst, nullable=False
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, onupdate=now_kst
     )
 
     # Relationships
     case: Mapped["Case"] = relationship("Case", back_populates="worker_qc_feedbacks")
     user: Mapped["User"] = relationship("User", back_populates="worker_qc_feedbacks")
+
+
+class ReviewerQcFeedback(Base):
+    """
+    검수자 QC 불일치 기록.
+    Auto-QC 결과와 검수자 판단이 다른 경우 상세 내용 기록.
+    """
+    __tablename__ = "reviewer_qc_feedbacks"
+    __table_args__ = (
+        UniqueConstraint("case_id", "reviewer_id", name="uq_case_reviewer_feedback"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    case_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("cases.id"), nullable=False
+    )
+    reviewer_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=False
+    )
+
+    # 불일치 여부
+    has_disagreement: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # 불일치 유형: "MISSED" (놓친 문제) / "FALSE_ALARM" (잘못된 경고)
+    disagreement_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    # 상세 내용
+    disagreement_detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 해당 세그먼트 목록: ["IVC", "Aorta"]
+    disagreement_segments_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # 검수 메모 (일반 메모)
+    review_memo: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_kst, nullable=False
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, onupdate=now_kst
+    )
+
+    # Relationships
+    case: Mapped["Case"] = relationship("Case", back_populates="reviewer_qc_feedbacks")
+    reviewer: Mapped["User"] = relationship("User", back_populates="reviewer_qc_feedbacks")

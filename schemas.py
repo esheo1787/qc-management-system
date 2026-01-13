@@ -7,6 +7,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from models import ActionType, CaseStatus, Difficulty, EventType, TimeOffType, UserRole
+from typing import List
 
 
 # Auth
@@ -28,16 +29,21 @@ class PreQcInput(BaseModel):
 
 # Case Registration
 class CaseRegisterItem(BaseModel):
-    case_uid: str = Field(..., min_length=1, max_length=100)
-    display_name: str = Field(..., min_length=1, max_length=200)
-    nas_path: Optional[str] = Field(None, max_length=500)
+    case_uid: str = Field(..., min_length=1, max_length=100)  # 케이스 ID
+    original_name: Optional[str] = Field(None, max_length=200)  # 원본 이름 (폴더명)
+    display_name: Optional[str] = Field(None, max_length=200)  # 하위 호환용
+    nas_path: Optional[str] = Field(None, max_length=500)  # 폴더 경로
     hospital: Optional[str] = Field(None, max_length=200)
-    slice_thickness_mm: Optional[float] = None
-    project_name: str = Field(..., min_length=1)
-    part_name: str = Field(..., min_length=1)
-    difficulty: Difficulty = Difficulty.MID
+    slice_thickness_mm: Optional[float] = None  # 두께(mm)
+    project_name: str = Field(..., min_length=1)  # 프로젝트
+    part_name: str = Field(..., min_length=1)  # 부위
+    difficulty: Difficulty = Difficulty.NORMAL  # 난이도
     metadata_json: Optional[str] = None
     preqc: Optional[PreQcInput] = None
+    # 추가 필드
+    wwl: Optional[str] = Field(None, max_length=50)  # Window Width/Level (예: "350/40")
+    memo: Optional[str] = None
+    tags: Optional[List[str]] = None  # 태그 목록
 
 
 class BulkRegisterRequest(BaseModel):
@@ -106,6 +112,10 @@ class CaseListItem(BaseModel):
     worker_completed_at: Optional[datetime]
     accepted_at: Optional[datetime]
     created_at: datetime
+    # 추가 필드
+    wwl: Optional[str] = None
+    memo: Optional[str] = None
+    tags_json: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -117,9 +127,39 @@ class CaseListResponse(BaseModel):
 
 # Case Detail
 class PreQcSummaryResponse(BaseModel):
-    flags_json: Optional[str]
+    id: int
+    case_id: int
+
+    # 기본 정보
+    folder_path: Optional[str]
     slice_count: Optional[int]
+    spacing_json: Optional[str]
+    volume_file: Optional[str]
+
+    # 슬라이스 두께
+    slice_thickness_mm: Optional[float]
+    slice_thickness_flag: Optional[str]
+
+    # 노이즈
+    noise_sigma_mean: Optional[float]
+    noise_level: Optional[str]
+
+    # 조영제
+    delta_hu: Optional[float]
+    contrast_flag: Optional[str]
+
+    # 혈관 가시성
+    vessel_voxel_ratio: Optional[float]
+    edge_strength: Optional[float]
+    vascular_visibility_score: Optional[float]
+    vascular_visibility_level: Optional[str]
+
+    # 기타
+    difficulty: Optional[str]
+    flags_json: Optional[str]
     expected_segments_json: Optional[str]
+    notes: Optional[str]
+
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -171,6 +211,10 @@ class CaseDetailResponse(BaseModel):
     preqc_summary: Optional[PreQcSummaryResponse]
     events: list[EventListItem]
     review_notes: list[ReviewNoteItem]
+    # 추가 필드
+    wwl: Optional[str] = None
+    memo: Optional[str] = None
+    tags_json: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -351,11 +395,60 @@ class CaseDetailWithMetricsResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# PreQC Summary (stored from local client)
+class PreQcSummaryCreateRequest(BaseModel):
+    case_id: int
+
+    # 기본 정보
+    folder_path: Optional[str] = Field(None, max_length=500)
+    slice_count: Optional[int] = None
+    spacing: Optional[List[float]] = None  # JSON으로 변환하여 저장
+    volume_file: Optional[str] = Field(None, max_length=255)
+
+    # 슬라이스 두께
+    slice_thickness_mm: Optional[float] = None
+    slice_thickness_flag: Optional[str] = Field(None, max_length=20)  # "OK", "WARN", "THICK"
+
+    # 노이즈
+    noise_sigma_mean: Optional[float] = None
+    noise_level: Optional[str] = Field(None, max_length=20)  # "LOW", "MODERATE", "HIGH"
+
+    # 조영제
+    delta_hu: Optional[float] = None
+    contrast_flag: Optional[str] = Field(None, max_length=20)  # "GOOD", "BORDERLINE", "POOR"
+
+    # 혈관 가시성
+    vessel_voxel_ratio: Optional[float] = None
+    edge_strength: Optional[float] = None
+    vascular_visibility_score: Optional[float] = None
+    vascular_visibility_level: Optional[str] = Field(None, max_length=20)  # "EXCELLENT", "USABLE", "BORDERLINE", "POOR"
+
+    # 기타
+    difficulty: Optional[str] = Field(None, max_length=10)  # "EASY", "NORMAL", "HARD", "VERY_HARD"
+    flags: Optional[List[str]] = None  # JSON으로 변환하여 저장
+    expected_segments: Optional[List[str]] = None  # JSON으로 변환하여 저장
+    notes: Optional[str] = None
+
+    # 하위 호환 필드
+    flags_json: Optional[str] = None
+    expected_segments_json: Optional[str] = None
+
+
 # AutoQC Summary (stored from local client)
 class AutoQcSummaryCreateRequest(BaseModel):
     case_id: int
-    qc_pass: bool
-    missing_segments_json: Optional[str] = None
+    status: Optional[str] = None  # "PASS", "WARN", "INCOMPLETE"
+
+    # 세그먼트 관련
+    missing_segments: Optional[list[str]] = None  # 누락된 필수 세그먼트
+    name_mismatches: Optional[list[dict]] = None  # 이름 불일치 [{"expected": "IVC", "found": "ivc", "type": "case_mismatch"}]
+    extra_segments: Optional[list[str]] = None  # 추가 세그먼트 (기록용)
+
+    # 이슈 관련
+    issues: Optional[list[dict]] = None  # 전체 이슈 목록
+    issue_count: Optional[dict] = None  # {"warn_level": 1, "incomplete_level": 0}
+
+    # 기존 필드 (하위 호환)
     geometry_mismatch: bool = False
     warnings_json: Optional[str] = None
 
@@ -363,10 +456,25 @@ class AutoQcSummaryCreateRequest(BaseModel):
 class AutoQcSummaryResponse(BaseModel):
     id: int
     case_id: int
-    qc_pass: bool
+    status: Optional[str]  # "PASS", "WARN", "INCOMPLETE"
+
+    # 세그먼트 관련
     missing_segments_json: Optional[str]
+    name_mismatches_json: Optional[str]
+    extra_segments_json: Optional[str]
+
+    # 이슈 관련
+    issues_json: Optional[str]
+    issue_count_json: Optional[str]
+
+    # 기존 필드 (하위 호환)
     geometry_mismatch: bool
     warnings_json: Optional[str]
+
+    # 수정 추적
+    revision: int = 1  # QC 실행 횟수
+    previous_issue_count: Optional[int] = None  # 이전 총 이슈 수
+
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -380,7 +488,7 @@ class QcDisagreementItem(BaseModel):
     hospital: Optional[str]
     part_name: str
     difficulty: Difficulty
-    autoqc_pass: bool
+    autoqc_status: Optional[str]  # "PASS", "WARN", "INCOMPLETE"
     case_status: CaseStatus
     disagreement_type: str  # "FALSE_POSITIVE" or "FALSE_NEGATIVE"
     accepted_at: Optional[datetime]
@@ -396,8 +504,8 @@ class QcDisagreementStats(BaseModel):
     total_cases_with_autoqc: int
     total_disagreements: int
     disagreement_rate: float
-    false_positives: int  # autoqc_pass=True but rework_requested
-    false_negatives: int  # autoqc_pass=False but accepted
+    false_positives: int  # autoqc PASS but rework_requested
+    false_negatives: int  # autoqc WARN/INCOMPLETE but accepted
     by_part: dict[str, dict]  # part_name -> {total, disagreements, rate}
     by_hospital: dict[str, dict]  # hospital -> {total, disagreements, rate}
     by_difficulty: dict[str, dict]  # difficulty -> {total, disagreements, rate}
@@ -515,8 +623,27 @@ class CohortSummary(BaseModel):
 # Worker QC Feedback
 # ============================================================
 
+# QC 이슈 수정 항목
+class QcFixItem(BaseModel):
+    issue_id: int  # Auto-QC issues_json에서의 인덱스
+    segment: str
+    code: str  # MISSING_REQUIRED, SEGMENT_NAME_MISMATCH, OVERLAP, etc.
+    fixed: bool = False
+
+
+# 추가 수정 항목 (QC에 없지만 수정한 것)
+class AdditionalFixItem(BaseModel):
+    segment: str
+    description: str
+
+
 class WorkerQcFeedbackCreateRequest(BaseModel):
     case_id: int
+    # 새로운 필드
+    qc_fixes: Optional[List[QcFixItem]] = None  # QC 이슈별 수정 여부
+    additional_fixes: Optional[List[AdditionalFixItem]] = None  # 추가 수정 사항
+    memo: Optional[str] = Field(None, max_length=2000)  # 작업 메모
+    # 하위 호환
     qc_result_error: bool = False  # True if worker thinks QC result is wrong
     feedback_text: Optional[str] = Field(None, max_length=2000)
 
@@ -526,12 +653,25 @@ class WorkerQcFeedbackResponse(BaseModel):
     case_id: int
     user_id: int
     username: str
+    # 새로운 필드
+    qc_fixes_json: Optional[str]
+    additional_fixes_json: Optional[str]
+    memo: Optional[str]
+    # 하위 호환
     qc_result_error: bool
     feedback_text: Optional[str]
     created_at: datetime
+    updated_at: Optional[datetime]
 
     model_config = {"from_attributes": True}
 
 
 class WorkerQcFeedbackListResponse(BaseModel):
     feedbacks: list[WorkerQcFeedbackResponse]
+
+
+# QC 이슈 수정율 계산용
+class FeedbackStats(BaseModel):
+    total_issues: int  # 전체 이슈 수
+    fixed_issues: int  # 수정 완료된 이슈 수
+    fix_rate: float  # fixed_issues / total_issues

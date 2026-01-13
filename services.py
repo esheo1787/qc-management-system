@@ -33,6 +33,7 @@ from models import (
     UserTimeOff,
     WorkCalendar,
     WorkLog,
+    WorkerQcFeedback,
     now_kst,
 )
 from schemas import (
@@ -61,6 +62,7 @@ from schemas import (
     EventResponse,
     HolidayListResponse,
     HolidayUpdateRequest,
+    PreQcSummaryCreateRequest,
     PreQcSummaryResponse,
     ProjectDefinitionLinkRequest,
     ProjectDefinitionLinkResponse,
@@ -152,7 +154,7 @@ DEFAULT_CONFIG = {
     "workday_hours": 8,
     "wip_limit": 1,
     "auto_timeout_minutes": 120,
-    "difficulty_weights": {"LOW": 1.0, "MID": 1.5, "HIGH": 2.0},
+    "difficulty_weights": {"EASY": 1.0, "NORMAL": 1.5, "HARD": 2.0, "VERY_HARD": 2.5},
 }
 
 
@@ -297,9 +299,14 @@ def bulk_register_cases(
             project = get_or_create_project(db, item.project_name)
             part = get_or_create_part(db, item.part_name)
 
+            # original_name이 없으면 display_name 사용 (하위 호환)
+            original_name = item.original_name or item.display_name
+            display_name = item.display_name or item.original_name or item.case_uid
+
             case = Case(
                 case_uid=item.case_uid,
-                display_name=item.display_name,
+                original_name=original_name,
+                display_name=display_name,
                 nas_path=item.nas_path,
                 hospital=item.hospital,
                 slice_thickness_mm=item.slice_thickness_mm,
@@ -738,9 +745,26 @@ def get_case_detail(db: Session, case_id: int) -> CaseDetailResponse:
     preqc = None
     if case.preqc_summary:
         preqc = PreQcSummaryResponse(
-            flags_json=case.preqc_summary.flags_json,
+            id=case.preqc_summary.id,
+            case_id=case.preqc_summary.case_id,
+            folder_path=case.preqc_summary.folder_path,
             slice_count=case.preqc_summary.slice_count,
+            spacing_json=case.preqc_summary.spacing_json,
+            volume_file=case.preqc_summary.volume_file,
+            slice_thickness_mm=case.preqc_summary.slice_thickness_mm,
+            slice_thickness_flag=case.preqc_summary.slice_thickness_flag,
+            noise_sigma_mean=case.preqc_summary.noise_sigma_mean,
+            noise_level=case.preqc_summary.noise_level,
+            delta_hu=case.preqc_summary.delta_hu,
+            contrast_flag=case.preqc_summary.contrast_flag,
+            vessel_voxel_ratio=case.preqc_summary.vessel_voxel_ratio,
+            edge_strength=case.preqc_summary.edge_strength,
+            vascular_visibility_score=case.preqc_summary.vascular_visibility_score,
+            vascular_visibility_level=case.preqc_summary.vascular_visibility_level,
+            difficulty=case.preqc_summary.difficulty,
+            flags_json=case.preqc_summary.flags_json,
             expected_segments_json=case.preqc_summary.expected_segments_json,
+            notes=case.preqc_summary.notes,
             created_at=case.preqc_summary.created_at,
         )
 
@@ -804,9 +828,26 @@ def get_case_detail_with_metrics(db: Session, case_id: int) -> CaseDetailWithMet
     preqc = None
     if case.preqc_summary:
         preqc = PreQcSummaryResponse(
-            flags_json=case.preqc_summary.flags_json,
+            id=case.preqc_summary.id,
+            case_id=case.preqc_summary.case_id,
+            folder_path=case.preqc_summary.folder_path,
             slice_count=case.preqc_summary.slice_count,
+            spacing_json=case.preqc_summary.spacing_json,
+            volume_file=case.preqc_summary.volume_file,
+            slice_thickness_mm=case.preqc_summary.slice_thickness_mm,
+            slice_thickness_flag=case.preqc_summary.slice_thickness_flag,
+            noise_sigma_mean=case.preqc_summary.noise_sigma_mean,
+            noise_level=case.preqc_summary.noise_level,
+            delta_hu=case.preqc_summary.delta_hu,
+            contrast_flag=case.preqc_summary.contrast_flag,
+            vessel_voxel_ratio=case.preqc_summary.vessel_voxel_ratio,
+            edge_strength=case.preqc_summary.edge_strength,
+            vascular_visibility_score=case.preqc_summary.vascular_visibility_score,
+            vascular_visibility_level=case.preqc_summary.vascular_visibility_level,
+            difficulty=case.preqc_summary.difficulty,
+            flags_json=case.preqc_summary.flags_json,
             expected_segments_json=case.preqc_summary.expected_segments_json,
+            notes=case.preqc_summary.notes,
             created_at=case.preqc_summary.created_at,
         )
 
@@ -1258,6 +1299,168 @@ def get_team_capacity(
 
 
 # ============================================================
+# PreQC Summary Services
+# ============================================================
+
+def save_preqc_summary(
+    db: Session, request: PreQcSummaryCreateRequest, current_user: User
+) -> PreQcSummaryResponse:
+    """
+    Save Pre-QC summary from local client.
+    NOTE: Server does NOT run Pre-QC - it only stores the summary.
+    The actual QC runs on local PC (offline-first, cost=0).
+    """
+    with db.begin():
+        case = db.query(Case).filter(Case.id == request.case_id).first()
+        if not case:
+            raise NotFoundError(f"Case {request.case_id} not found")
+
+        # Convert list fields to JSON strings
+        spacing_json = json.dumps(request.spacing, ensure_ascii=False) if request.spacing else None
+        # flags: prefer list field, fallback to legacy flags_json
+        if request.flags:
+            flags_json = json.dumps(request.flags, ensure_ascii=False)
+        else:
+            flags_json = request.flags_json
+        # expected_segments: prefer list field, fallback to legacy expected_segments_json
+        if request.expected_segments:
+            expected_segments_json = json.dumps(request.expected_segments, ensure_ascii=False)
+        else:
+            expected_segments_json = request.expected_segments_json
+
+        # Check if summary already exists
+        existing = db.query(PreQcSummary).filter(
+            PreQcSummary.case_id == request.case_id
+        ).first()
+
+        if existing:
+            # Update existing
+            existing.folder_path = request.folder_path
+            existing.slice_count = request.slice_count
+            existing.spacing_json = spacing_json
+            existing.volume_file = request.volume_file
+            existing.slice_thickness_mm = request.slice_thickness_mm
+            existing.slice_thickness_flag = request.slice_thickness_flag
+            existing.noise_sigma_mean = request.noise_sigma_mean
+            existing.noise_level = request.noise_level
+            existing.delta_hu = request.delta_hu
+            existing.contrast_flag = request.contrast_flag
+            existing.vessel_voxel_ratio = request.vessel_voxel_ratio
+            existing.edge_strength = request.edge_strength
+            existing.vascular_visibility_score = request.vascular_visibility_score
+            existing.vascular_visibility_level = request.vascular_visibility_level
+            existing.difficulty = request.difficulty
+            existing.flags_json = flags_json
+            existing.expected_segments_json = expected_segments_json
+            existing.notes = request.notes
+            existing.created_at = now_kst()
+            db.flush()
+
+            return PreQcSummaryResponse(
+                id=existing.id,
+                case_id=existing.case_id,
+                folder_path=existing.folder_path,
+                slice_count=existing.slice_count,
+                spacing_json=existing.spacing_json,
+                volume_file=existing.volume_file,
+                slice_thickness_mm=existing.slice_thickness_mm,
+                slice_thickness_flag=existing.slice_thickness_flag,
+                noise_sigma_mean=existing.noise_sigma_mean,
+                noise_level=existing.noise_level,
+                delta_hu=existing.delta_hu,
+                contrast_flag=existing.contrast_flag,
+                vessel_voxel_ratio=existing.vessel_voxel_ratio,
+                edge_strength=existing.edge_strength,
+                vascular_visibility_score=existing.vascular_visibility_score,
+                vascular_visibility_level=existing.vascular_visibility_level,
+                difficulty=existing.difficulty,
+                flags_json=existing.flags_json,
+                expected_segments_json=existing.expected_segments_json,
+                notes=existing.notes,
+                created_at=existing.created_at,
+            )
+        else:
+            # Create new
+            summary = PreQcSummary(
+                case_id=request.case_id,
+                folder_path=request.folder_path,
+                slice_count=request.slice_count,
+                spacing_json=spacing_json,
+                volume_file=request.volume_file,
+                slice_thickness_mm=request.slice_thickness_mm,
+                slice_thickness_flag=request.slice_thickness_flag,
+                noise_sigma_mean=request.noise_sigma_mean,
+                noise_level=request.noise_level,
+                delta_hu=request.delta_hu,
+                contrast_flag=request.contrast_flag,
+                vessel_voxel_ratio=request.vessel_voxel_ratio,
+                edge_strength=request.edge_strength,
+                vascular_visibility_score=request.vascular_visibility_score,
+                vascular_visibility_level=request.vascular_visibility_level,
+                difficulty=request.difficulty,
+                flags_json=flags_json,
+                expected_segments_json=expected_segments_json,
+                notes=request.notes,
+            )
+            db.add(summary)
+            db.flush()
+
+            return PreQcSummaryResponse(
+                id=summary.id,
+                case_id=summary.case_id,
+                folder_path=summary.folder_path,
+                slice_count=summary.slice_count,
+                spacing_json=summary.spacing_json,
+                volume_file=summary.volume_file,
+                slice_thickness_mm=summary.slice_thickness_mm,
+                slice_thickness_flag=summary.slice_thickness_flag,
+                noise_sigma_mean=summary.noise_sigma_mean,
+                noise_level=summary.noise_level,
+                delta_hu=summary.delta_hu,
+                contrast_flag=summary.contrast_flag,
+                vessel_voxel_ratio=summary.vessel_voxel_ratio,
+                edge_strength=summary.edge_strength,
+                vascular_visibility_score=summary.vascular_visibility_score,
+                vascular_visibility_level=summary.vascular_visibility_level,
+                difficulty=summary.difficulty,
+                flags_json=summary.flags_json,
+                expected_segments_json=summary.expected_segments_json,
+                notes=summary.notes,
+                created_at=summary.created_at,
+            )
+
+
+def get_preqc_summary(db: Session, case_id: int) -> Optional[PreQcSummaryResponse]:
+    """Get Pre-QC summary for a case."""
+    summary = db.query(PreQcSummary).filter(PreQcSummary.case_id == case_id).first()
+    if not summary:
+        return None
+    return PreQcSummaryResponse(
+        id=summary.id,
+        case_id=summary.case_id,
+        folder_path=summary.folder_path,
+        slice_count=summary.slice_count,
+        spacing_json=summary.spacing_json,
+        volume_file=summary.volume_file,
+        slice_thickness_mm=summary.slice_thickness_mm,
+        slice_thickness_flag=summary.slice_thickness_flag,
+        noise_sigma_mean=summary.noise_sigma_mean,
+        noise_level=summary.noise_level,
+        delta_hu=summary.delta_hu,
+        contrast_flag=summary.contrast_flag,
+        vessel_voxel_ratio=summary.vessel_voxel_ratio,
+        edge_strength=summary.edge_strength,
+        vascular_visibility_score=summary.vascular_visibility_score,
+        vascular_visibility_level=summary.vascular_visibility_level,
+        difficulty=summary.difficulty,
+        flags_json=summary.flags_json,
+        expected_segments_json=summary.expected_segments_json,
+        notes=summary.notes,
+        created_at=summary.created_at,
+    )
+
+
+# ============================================================
 # AutoQC Summary Services
 # ============================================================
 
@@ -1274,15 +1477,37 @@ def save_autoqc_summary(
         if not case:
             raise NotFoundError(f"Case {request.case_id} not found")
 
+        # Convert list/dict fields to JSON strings
+        missing_segments_json = json.dumps(request.missing_segments, ensure_ascii=False) if request.missing_segments else None
+        name_mismatches_json = json.dumps(request.name_mismatches, ensure_ascii=False) if request.name_mismatches else None
+        extra_segments_json = json.dumps(request.extra_segments, ensure_ascii=False) if request.extra_segments else None
+        issues_json = json.dumps(request.issues, ensure_ascii=False) if request.issues else None
+        issue_count_json = json.dumps(request.issue_count, ensure_ascii=False) if request.issue_count else None
+
         # Check if summary already exists
         existing = db.query(AutoQcSummary).filter(
             AutoQcSummary.case_id == request.case_id
         ).first()
 
         if existing:
-            # Update existing
-            existing.qc_pass = request.qc_pass
-            existing.missing_segments_json = request.missing_segments_json
+            # 이전 이슈 수 계산
+            prev_issue_count = 0
+            if existing.issue_count_json:
+                try:
+                    prev_counts = json.loads(existing.issue_count_json)
+                    prev_issue_count = prev_counts.get("warn_level", 0) + prev_counts.get("incomplete_level", 0)
+                except json.JSONDecodeError:
+                    pass
+
+            # Update existing with revision increment
+            existing.previous_issue_count = prev_issue_count
+            existing.revision = existing.revision + 1
+            existing.status = request.status
+            existing.missing_segments_json = missing_segments_json
+            existing.name_mismatches_json = name_mismatches_json
+            existing.extra_segments_json = extra_segments_json
+            existing.issues_json = issues_json
+            existing.issue_count_json = issue_count_json
             existing.geometry_mismatch = request.geometry_mismatch
             existing.warnings_json = request.warnings_json
             existing.created_at = now_kst()
@@ -1291,20 +1516,32 @@ def save_autoqc_summary(
             return AutoQcSummaryResponse(
                 id=existing.id,
                 case_id=existing.case_id,
-                qc_pass=existing.qc_pass,
+                status=existing.status,
                 missing_segments_json=existing.missing_segments_json,
+                name_mismatches_json=existing.name_mismatches_json,
+                extra_segments_json=existing.extra_segments_json,
+                issues_json=existing.issues_json,
+                issue_count_json=existing.issue_count_json,
                 geometry_mismatch=existing.geometry_mismatch,
                 warnings_json=existing.warnings_json,
+                revision=existing.revision,
+                previous_issue_count=existing.previous_issue_count,
                 created_at=existing.created_at,
             )
         else:
-            # Create new
+            # Create new (first QC)
             summary = AutoQcSummary(
                 case_id=request.case_id,
-                qc_pass=request.qc_pass,
-                missing_segments_json=request.missing_segments_json,
+                status=request.status,
+                missing_segments_json=missing_segments_json,
+                name_mismatches_json=name_mismatches_json,
+                extra_segments_json=extra_segments_json,
+                issues_json=issues_json,
+                issue_count_json=issue_count_json,
                 geometry_mismatch=request.geometry_mismatch,
                 warnings_json=request.warnings_json,
+                revision=1,
+                previous_issue_count=None,
             )
             db.add(summary)
             db.flush()
@@ -1312,10 +1549,16 @@ def save_autoqc_summary(
             return AutoQcSummaryResponse(
                 id=summary.id,
                 case_id=summary.case_id,
-                qc_pass=summary.qc_pass,
+                status=summary.status,
                 missing_segments_json=summary.missing_segments_json,
+                name_mismatches_json=summary.name_mismatches_json,
+                extra_segments_json=summary.extra_segments_json,
+                issues_json=summary.issues_json,
+                issue_count_json=summary.issue_count_json,
                 geometry_mismatch=summary.geometry_mismatch,
                 warnings_json=summary.warnings_json,
+                revision=summary.revision,
+                previous_issue_count=summary.previous_issue_count,
                 created_at=summary.created_at,
             )
 
@@ -1329,10 +1572,16 @@ def get_autoqc_summary(db: Session, case_id: int) -> Optional[AutoQcSummaryRespo
     return AutoQcSummaryResponse(
         id=summary.id,
         case_id=summary.case_id,
-        qc_pass=summary.qc_pass,
+        status=summary.status,
         missing_segments_json=summary.missing_segments_json,
+        name_mismatches_json=summary.name_mismatches_json,
+        extra_segments_json=summary.extra_segments_json,
+        issues_json=summary.issues_json,
+        issue_count_json=summary.issue_count_json,
         geometry_mismatch=summary.geometry_mismatch,
         warnings_json=summary.warnings_json,
+        revision=summary.revision,
+        previous_issue_count=summary.previous_issue_count,
         created_at=summary.created_at,
     )
 
@@ -1352,8 +1601,8 @@ def get_qc_disagreements(
     """
     Get list of QC disagreements.
 
-    Disagreement = (autoqc.qc_pass=False AND accepted=True)
-                   OR (autoqc.qc_pass=True AND rework_requested=True)
+    Disagreement = (autoqc.status in [WARN, INCOMPLETE] AND accepted=True)
+                   OR (autoqc.status=PASS AND rework_requested=True)
     """
     from datetime import date as date_type
 
@@ -1387,12 +1636,12 @@ def get_qc_disagreements(
 
         disagreement_type = None
 
-        # FALSE_NEGATIVE: AutoQC said FAIL but human accepted
-        if not autoqc.qc_pass and is_accepted:
+        # FALSE_NEGATIVE: AutoQC said WARN/INCOMPLETE but human accepted
+        if autoqc.status in ("WARN", "INCOMPLETE") and is_accepted:
             disagreement_type = "FALSE_NEGATIVE"
 
         # FALSE_POSITIVE: AutoQC said PASS but rework was requested
-        if autoqc.qc_pass and has_rework_event:
+        if autoqc.status == "PASS" and has_rework_event:
             disagreement_type = "FALSE_POSITIVE"
 
         if disagreement_type:
@@ -1409,7 +1658,7 @@ def get_qc_disagreements(
                 hospital=case.hospital,
                 part_name=case.part.name,
                 difficulty=case.difficulty,
-                autoqc_pass=autoqc.qc_pass,
+                autoqc_status=autoqc.status,
                 case_status=case.status,
                 disagreement_type=disagreement_type,
                 accepted_at=case.accepted_at,
@@ -1460,10 +1709,12 @@ def get_qc_disagreement_stats(
         is_accepted = case.status == CaseStatus.ACCEPTED
 
         is_disagreement = False
-        if not autoqc.qc_pass and is_accepted:
+        # FALSE_NEGATIVE: AutoQC said WARN/INCOMPLETE but human accepted
+        if autoqc.status in ("WARN", "INCOMPLETE") and is_accepted:
             false_negatives += 1
             is_disagreement = True
-        if autoqc.qc_pass and has_rework_event:
+        # FALSE_POSITIVE: AutoQC said PASS but rework was requested
+        if autoqc.status == "PASS" and has_rework_event:
             false_positives += 1
             is_disagreement = True
 
@@ -1930,3 +2181,260 @@ def get_cohort_summary(
         total_man_days=round(total_man_days, 2),
         avg_work_seconds_per_case=round(avg_work_seconds, 2),
     )
+
+
+# ============================================================
+# Worker QC Feedback Services
+# ============================================================
+
+def get_case_feedbacks(db: Session, case_id: int) -> list[WorkerQcFeedback]:
+    """Get all feedbacks for a case."""
+    return db.query(WorkerQcFeedback).filter(
+        WorkerQcFeedback.case_id == case_id
+    ).order_by(WorkerQcFeedback.created_at.desc()).all()
+
+
+def create_feedback(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    qc_result_error: bool,
+    feedback_text: Optional[str],
+) -> WorkerQcFeedback:
+    """Create a new feedback and log event."""
+    import uuid
+
+    feedback = WorkerQcFeedback(
+        case_id=case_id,
+        user_id=user_id,
+        qc_result_error=qc_result_error,
+        feedback_text=feedback_text,
+    )
+    db.add(feedback)
+    db.flush()
+
+    # Build event_code for readable log
+    error_str = "QC오류" if qc_result_error else "QC정상"
+    content_str = feedback_text if feedback_text else "(내용 없음)"
+    event_code = f"작성 내용: [{error_str}] {content_str}"
+
+    # Log event
+    event = Event(
+        case_id=case_id,
+        user_id=user_id,
+        event_type=EventType.FEEDBACK_CREATED,
+        idempotency_key=f"FB_CREATED_{case_id}_{feedback.id}_{uuid.uuid4().hex[:8]}",
+        event_code=event_code,
+        payload_json=json.dumps({
+            "feedback_id": feedback.id,
+            "qc_result_error": qc_result_error,
+            "feedback_text": feedback_text,
+        }, ensure_ascii=False),
+    )
+    db.add(event)
+    db.commit()
+
+    return feedback
+
+
+def update_feedback(
+    db: Session,
+    feedback_id: int,
+    user_id: int,
+    qc_result_error: bool,
+    feedback_text: Optional[str],
+) -> WorkerQcFeedback:
+    """Update a feedback and log event with previous content."""
+    import uuid
+
+    feedback = db.query(WorkerQcFeedback).filter(WorkerQcFeedback.id == feedback_id).first()
+    if not feedback:
+        raise NotFoundError(f"Feedback {feedback_id} not found")
+
+    # Store previous values for logging
+    prev_error = feedback.qc_result_error
+    prev_text = feedback.feedback_text
+
+    feedback.qc_result_error = qc_result_error
+    feedback.feedback_text = feedback_text
+
+    # Build event_code for readable log
+    prev_error_str = "QC오류" if prev_error else "QC정상"
+    prev_content = prev_text if prev_text else "(내용 없음)"
+    new_error_str = "QC오류" if qc_result_error else "QC정상"
+    new_content = feedback_text if feedback_text else "(내용 없음)"
+    event_code = f"이전: [{prev_error_str}] {prev_content} → 변경: [{new_error_str}] {new_content}"
+
+    # Log event with previous content
+    event = Event(
+        case_id=feedback.case_id,
+        user_id=user_id,
+        event_type=EventType.FEEDBACK_UPDATED,
+        idempotency_key=f"FB_UPDATED_{feedback.case_id}_{feedback_id}_{uuid.uuid4().hex[:8]}",
+        event_code=event_code,
+        payload_json=json.dumps({
+            "feedback_id": feedback.id,
+            "previous": {
+                "qc_result_error": prev_error,
+                "feedback_text": prev_text,
+            },
+            "updated": {
+                "qc_result_error": qc_result_error,
+                "feedback_text": feedback_text,
+            },
+        }, ensure_ascii=False),
+    )
+    db.add(event)
+    db.commit()
+
+    return feedback
+
+
+def delete_feedback(db: Session, feedback_id: int, user_id: int) -> None:
+    """Delete a feedback and log event with deleted content."""
+    import uuid
+
+    feedback = db.query(WorkerQcFeedback).filter(WorkerQcFeedback.id == feedback_id).first()
+    if not feedback:
+        raise NotFoundError(f"Feedback {feedback_id} not found")
+
+    case_id = feedback.case_id
+    deleted_content = {
+        "feedback_id": feedback.id,
+        "qc_result_error": feedback.qc_result_error,
+        "feedback_text": feedback.feedback_text,
+    }
+
+    # Build event_code for readable log
+    error_str = "QC오류" if feedback.qc_result_error else "QC정상"
+    content_str = feedback.feedback_text if feedback.feedback_text else "(내용 없음)"
+    event_code = f"삭제된 내용: [{error_str}] {content_str}"
+
+    # Log event before deletion
+    event = Event(
+        case_id=case_id,
+        user_id=user_id,
+        event_type=EventType.FEEDBACK_DELETED,
+        idempotency_key=f"FB_DELETED_{case_id}_{feedback_id}_{uuid.uuid4().hex[:8]}",
+        event_code=event_code,
+        payload_json=json.dumps(deleted_content, ensure_ascii=False),
+    )
+    db.add(event)
+
+    db.delete(feedback)
+    db.commit()
+
+    return None
+
+
+def save_or_update_worker_feedback(
+    db: Session,
+    case_id: int,
+    user_id: int,
+    qc_fixes: Optional[list] = None,
+    additional_fixes: Optional[list] = None,
+    memo: Optional[str] = None,
+    qc_result_error: bool = False,
+    feedback_text: Optional[str] = None,
+) -> WorkerQcFeedback:
+    """
+    Save or update worker feedback (upsert pattern).
+    One feedback per case per worker.
+    """
+    import uuid
+
+    # Convert lists to JSON
+    qc_fixes_json = json.dumps(qc_fixes, ensure_ascii=False) if qc_fixes else None
+    additional_fixes_json = json.dumps(additional_fixes, ensure_ascii=False) if additional_fixes else None
+
+    # Check if feedback already exists for this case+user
+    existing = db.query(WorkerQcFeedback).filter(
+        WorkerQcFeedback.case_id == case_id,
+        WorkerQcFeedback.user_id == user_id,
+    ).first()
+
+    if existing:
+        # Update existing
+        existing.qc_fixes_json = qc_fixes_json
+        existing.additional_fixes_json = additional_fixes_json
+        existing.memo = memo
+        existing.qc_result_error = qc_result_error
+        existing.feedback_text = feedback_text
+
+        # Log event
+        event = Event(
+            case_id=case_id,
+            user_id=user_id,
+            event_type=EventType.FEEDBACK_UPDATED,
+            idempotency_key=f"FB_SAVE_{case_id}_{user_id}_{uuid.uuid4().hex[:8]}",
+            event_code="피드백 업데이트",
+            payload_json=json.dumps({
+                "feedback_id": existing.id,
+                "qc_fixes": qc_fixes,
+                "additional_fixes": additional_fixes,
+                "memo": memo,
+            }, ensure_ascii=False),
+        )
+        db.add(event)
+        db.commit()
+        return existing
+    else:
+        # Create new
+        feedback = WorkerQcFeedback(
+            case_id=case_id,
+            user_id=user_id,
+            qc_fixes_json=qc_fixes_json,
+            additional_fixes_json=additional_fixes_json,
+            memo=memo,
+            qc_result_error=qc_result_error,
+            feedback_text=feedback_text,
+        )
+        db.add(feedback)
+        db.flush()
+
+        # Log event
+        event = Event(
+            case_id=case_id,
+            user_id=user_id,
+            event_type=EventType.FEEDBACK_CREATED,
+            idempotency_key=f"FB_SAVE_{case_id}_{user_id}_{uuid.uuid4().hex[:8]}",
+            event_code="피드백 저장",
+            payload_json=json.dumps({
+                "feedback_id": feedback.id,
+                "qc_fixes": qc_fixes,
+                "additional_fixes": additional_fixes,
+                "memo": memo,
+            }, ensure_ascii=False),
+        )
+        db.add(event)
+        db.commit()
+        return feedback
+
+
+def get_worker_feedback(
+    db: Session, case_id: int, user_id: int
+) -> Optional[WorkerQcFeedback]:
+    """Get feedback for a specific case and worker."""
+    return db.query(WorkerQcFeedback).filter(
+        WorkerQcFeedback.case_id == case_id,
+        WorkerQcFeedback.user_id == user_id,
+    ).first()
+
+
+def compute_feedback_stats(qc_fixes_json: Optional[str]) -> dict:
+    """Compute fix rate statistics from qc_fixes_json."""
+    if not qc_fixes_json:
+        return {"total_issues": 0, "fixed_issues": 0, "fix_rate": 0.0}
+
+    try:
+        qc_fixes = json.loads(qc_fixes_json)
+        total = len(qc_fixes)
+        fixed = sum(1 for fix in qc_fixes if fix.get("fixed", False))
+        rate = fixed / total if total > 0 else 0.0
+        return {
+            "total_issues": total,
+            "fixed_issues": fixed,
+            "fix_rate": round(rate, 2),
+        }
+    except (json.JSONDecodeError, TypeError):
+        return {"total_issues": 0, "fixed_issues": 0, "fix_rate": 0.0}

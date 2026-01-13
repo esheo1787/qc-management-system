@@ -196,8 +196,8 @@ def weighted_throughput(
     Calculate weighted throughput based on difficulty.
 
     Args:
-        cases_by_difficulty: Dict like {"LOW": 5, "MID": 3, "HIGH": 2}
-        difficulty_weights: Dict like {"LOW": 1.0, "MID": 1.5, "HIGH": 2.0}
+        cases_by_difficulty: Dict like {"EASY": 5, "NORMAL": 3, "HARD": 2}
+        difficulty_weights: Dict like {"EASY": 1.0, "NORMAL": 1.5, "HARD": 2.0, "VERY_HARD": 2.5}
 
     Returns:
         Weighted case count
