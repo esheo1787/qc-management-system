@@ -402,26 +402,26 @@ def render_styled_dataframe(
                     st.markdown("**표시할 컬럼**")
                 with check_col:
                     current_visible = st.session_state.get(visible_key, [])
-                    is_all_visible = len(current_visible) == len(all_columns) and set(current_visible) == set(all_columns)
-                    # 체크박스가 session_state에 없을 때만 초기값 설정
-                    if select_all_visible_key not in st.session_state:
-                        st.session_state[select_all_visible_key] = is_all_visible
-                    select_all_visible = st.checkbox(
+                    is_all_visible = len(current_visible) == len(all_columns) and set(current_visible) == set(all_columns) if all_columns else False
+                    
+                    # 체크박스 상태를 multiselect 상태에 맞춰 동기화
+                    st.session_state[select_all_visible_key] = is_all_visible
+                    
+                    def on_visible_checkbox_change():
+                        if st.session_state[select_all_visible_key]:
+                            st.session_state[visible_key] = list(all_columns)
+                        else:
+                            st.session_state[visible_key] = []
+                    
+                    st.checkbox(
                         "전체",
                         key=select_all_visible_key,
+                        on_change=on_visible_checkbox_change,
                     )
-                # 체크박스 변경 시 전체 선택/해제
-                if select_all_visible and not is_all_visible:
-                    st.session_state[visible_key] = all_columns.copy()
-                    st.rerun()
-                elif not select_all_visible and is_all_visible:
-                    st.session_state[visible_key] = []
-                    st.rerun()
 
-                visible_cols = st.multiselect(
+                st.multiselect(
                     "표시할 컬럼 (비어있으면 전체)",
                     options=all_columns,
-                    default=st.session_state.get(visible_key, []),
                     key=visible_key,
                     label_visibility="collapsed",
                 )
@@ -434,27 +434,27 @@ def render_styled_dataframe(
                 with check_col2:
                     available_for_pin = pinnable_columns if pinnable_columns else all_columns
                     current_pinned = st.session_state.get(pinned_key, [])
-                    is_all_pinned = len(current_pinned) == len(available_for_pin) and set(current_pinned) == set(available_for_pin)
-                    # 체크박스가 session_state에 없을 때만 초기값 설정
-                    if select_all_pinned_key not in st.session_state:
-                        st.session_state[select_all_pinned_key] = is_all_pinned
-                    select_all_pinned = st.checkbox(
+                    is_all_pinned = len(current_pinned) == len(available_for_pin) and set(current_pinned) == set(available_for_pin) if available_for_pin else False
+                    
+                    # 체크박스 상태를 multiselect 상태에 맞춰 동기화
+                    st.session_state[select_all_pinned_key] = is_all_pinned
+                    
+                    def on_pinned_checkbox_change():
+                        if st.session_state[select_all_pinned_key]:
+                            st.session_state[pinned_key] = list(available_for_pin)
+                        else:
+                            st.session_state[pinned_key] = []
+                    
+                    st.checkbox(
                         "전체",
                         key=select_all_pinned_key,
+                        on_change=on_pinned_checkbox_change,
                     )
-                # 체크박스 변경 시 전체 선택/해제
-                if select_all_pinned and not is_all_pinned:
-                    st.session_state[pinned_key] = list(available_for_pin)
-                    st.rerun()
-                elif not select_all_pinned and is_all_pinned:
-                    st.session_state[pinned_key] = []
-                    st.rerun()
 
                 available_for_pin = pinnable_columns if pinnable_columns else all_columns
-                pinned_cols = st.multiselect(
+                st.multiselect(
                     "왼쪽 고정 컬럼",
                     options=available_for_pin,
-                    default=st.session_state.get(pinned_key, []),
                     key=pinned_key,
                     label_visibility="collapsed",
                 )
