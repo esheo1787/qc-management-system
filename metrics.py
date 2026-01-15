@@ -361,3 +361,229 @@ def normalize_by_capacity(
 
     work_hours = work_seconds / 3600
     return round(work_hours / available_hours, 4)
+
+
+def compute_performance_stats(
+    cases: list,
+    start_date: date,
+    end_date: date,
+    workdays: int,
+    selected_workers: list[str] = None,
+) -> dict:
+    """
+    성과 탭 전용 집계 함수.
+    요약 카드, 작업자별 테이블, 월별 추이 테이블에서 재사용.
+
+    Args:
+        cases: ACCEPTED 상태의 Case 객체 리스트 (accepted_at 기준 필터링된)
+        start_date: 집계 시작일
+        end_date: 집계 종료일
+        workdays: 해당 기간의 근무일 수
+        selected_workers: 선택된 작업자 목록 (None이면 전체)
+
+    Returns:
+        {
+            "summary": {
+                "total_completed": int,
+                "avg_days": float,
+                "rework_rate": float,
+                "daily_avg": float,
+            },
+            "by_worker": [
+                {
+                    "worker": str,
+                    "completed": int,
+                    "rework": int,
+                    "rework_rate": float,
+                    "first_pass": int,
+                    "first_pass_rate": float,
+                },
+                ...
+            ],
+            "totals": {
+                "completed": int,
+                "rework": int,
+                "rework_rate": float,
+                "first_pass": int,
+                "first_pass_rate": float,
+            }
+        }
+    """
+    # 작업자별 집계
+    worker_stats = {}
+
+    for case in cases:
+        if not case.assigned_user:
+            continue
+
+        username = case.assigned_user.username
+
+        # 작업자 필터 적용
+        if selected_workers and username not in selected_workers:
+            continue
+
+        if username not in worker_stats:
+            worker_stats[username] = {
+                "completed": 0,
+                "rework": 0,
+                "total_days": 0,
+                "days_count": 0,
+            }
+
+        worker_stats[username]["completed"] += 1
+
+        # 재작업 여부: revision > 1 이면 재작업 발생한 케이스
+        if case.revision > 1:
+            worker_stats[username]["rework"] += 1
+
+        # 소요일 계산 (started_at ~ worker_completed_at 또는 accepted_at)
+        if case.started_at:
+            end_dt = case.worker_completed_at or case.accepted_at
+            if end_dt:
+                days = (end_dt.date() - case.started_at.date()).days + 1
+                worker_stats[username]["total_days"] += days
+                worker_stats[username]["days_count"] += 1
+
+    # 결과 계산
+    by_worker = []
+    total_completed = 0
+    total_rework = 0
+    total_days = 0
+    total_days_count = 0
+
+    for username in sorted(worker_stats.keys()):
+        stats = worker_stats[username]
+        completed = stats["completed"]
+        rework = stats["rework"]
+        first_pass = completed - rework
+        rework_rate = (rework / completed * 100) if completed > 0 else 0
+        first_pass_rate = (first_pass / completed * 100) if completed > 0 else 0
+
+        by_worker.append({
+            "worker": username,
+            "completed": completed,
+            "rework": rework,
+            "rework_rate": round(rework_rate, 1),
+            "first_pass": first_pass,
+            "first_pass_rate": round(first_pass_rate, 1),
+        })
+
+        total_completed += completed
+        total_rework += rework
+        total_days += stats["total_days"]
+        total_days_count += stats["days_count"]
+
+    # 전체 합계
+    total_first_pass = total_completed - total_rework
+    total_rework_rate = (total_rework / total_completed * 100) if total_completed > 0 else 0
+    total_first_pass_rate = (total_first_pass / total_completed * 100) if total_completed > 0 else 0
+    avg_days = (total_days / total_days_count) if total_days_count > 0 else 0
+    daily_avg = (total_completed / workdays) if workdays > 0 else 0
+
+    return {
+        "summary": {
+            "total_completed": total_completed,
+            "avg_days": round(avg_days, 2),
+            "rework_rate": round(total_rework_rate, 1),
+            "daily_avg": round(daily_avg, 2),
+        },
+        "by_worker": by_worker,
+        "totals": {
+            "completed": total_completed,
+            "rework": total_rework,
+            "rework_rate": round(total_rework_rate, 1),
+            "first_pass": total_first_pass,
+            "first_pass_rate": round(total_first_pass_rate, 1),
+        }
+    }
+
+
+def compute_monthly_performance(
+    cases: list,
+    year: int,
+    start_date: date,
+    end_date: date,
+    selected_workers: list[str] = None,
+) -> list[dict]:
+    """
+    월별 추이 집계 함수.
+    연도의 1~12월에 대해 집계하되, start_date~end_date 범위와 교집합인 구간만 계산.
+
+    Args:
+        cases: ACCEPTED 상태의 Case 객체 리스트
+        year: 대상 연도
+        start_date: 기간 시작일
+        end_date: 기간 종료일
+        selected_workers: 선택된 작업자 목록
+
+    Returns:
+        [
+            {
+                "month": "YYYY-MM",
+                "in_range": bool,  # 기간 범위 내인지
+                "completed": int or None,
+                "rework": int or None,
+                "rework_rate": float or None,
+                "first_pass_rate": float or None,
+            },
+            ...
+        ]
+    """
+    from calendar import monthrange
+
+    monthly_data = []
+
+    for month in range(1, 13):
+        month_start = date(year, month, 1)
+        month_end = date(year, month, monthrange(year, month)[1])
+
+        # 기간과의 교집합 계산
+        intersect_start = max(month_start, start_date)
+        intersect_end = min(month_end, end_date)
+
+        month_label = f"{year}-{month:02d}"
+
+        # 기간 범위 밖인 경우
+        if intersect_start > intersect_end:
+            monthly_data.append({
+                "month": month_label,
+                "in_range": False,
+                "completed": None,
+                "rework": None,
+                "rework_rate": None,
+                "first_pass_rate": None,
+            })
+            continue
+
+        # 해당 월/교집합 구간의 케이스 필터링
+        completed = 0
+        rework = 0
+
+        for case in cases:
+            if not case.assigned_user:
+                continue
+            if selected_workers and case.assigned_user.username not in selected_workers:
+                continue
+            if not case.accepted_at:
+                continue
+
+            accepted_date = case.accepted_at.date()
+            if intersect_start <= accepted_date <= intersect_end:
+                completed += 1
+                if case.revision > 1:
+                    rework += 1
+
+        first_pass = completed - rework
+        rework_rate = (rework / completed * 100) if completed > 0 else 0
+        first_pass_rate = (first_pass / completed * 100) if completed > 0 else 0
+
+        monthly_data.append({
+            "month": month_label,
+            "in_range": True,
+            "completed": completed,
+            "rework": rework,
+            "rework_rate": round(rework_rate, 1),
+            "first_pass_rate": round(first_pass_rate, 1),
+        })
+
+    return monthly_data

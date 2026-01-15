@@ -17,7 +17,19 @@ class AuthMeResponse(BaseModel):
     role: UserRole
     is_active: bool
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True,
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": 1,
+                    "username": "admin1",
+                    "role": "ADMIN",
+                    "is_active": True,
+                }
+            ]
+        },
+    }
 
 
 # PreQC
@@ -29,70 +41,164 @@ class PreQcInput(BaseModel):
 
 # Case Registration
 class CaseRegisterItem(BaseModel):
-    case_uid: str = Field(..., min_length=1, max_length=100)  # 케이스 ID
-    original_name: Optional[str] = Field(None, max_length=200)  # 원본 이름 (폴더명)
-    display_name: Optional[str] = Field(None, max_length=200)  # 하위 호환용
-    nas_path: Optional[str] = Field(None, max_length=500)  # 폴더 경로
-    hospital: Optional[str] = Field(None, max_length=200)
-    slice_thickness_mm: Optional[float] = None  # 두께(mm)
-    project_name: str = Field(..., min_length=1)  # 프로젝트
-    part_name: str = Field(..., min_length=1)  # 부위
-    difficulty: Difficulty = Difficulty.NORMAL  # 난이도
-    metadata_json: Optional[str] = None
-    preqc: Optional[PreQcInput] = None
-    # 추가 필드
-    wwl: Optional[str] = Field(None, max_length=50)  # Window Width/Level (예: "350/40")
-    memo: Optional[str] = None
-    tags: Optional[List[str]] = None  # 태그 목록
+    """케이스 등록 요청 항목"""
+    case_uid: str = Field(..., min_length=1, max_length=100, description="케이스 고유 ID")
+    original_name: Optional[str] = Field(None, max_length=200, description="원본 폴더명")
+    display_name: Optional[str] = Field(None, max_length=200, description="표시명 (하위 호환)")
+    nas_path: Optional[str] = Field(None, max_length=500, description="NAS 폴더 경로")
+    hospital: Optional[str] = Field(None, max_length=200, description="병원명")
+    slice_thickness_mm: Optional[float] = Field(None, description="슬라이스 두께 (mm)")
+    project_name: str = Field(..., min_length=1, description="프로젝트명")
+    part_name: str = Field(..., min_length=1, description="부위명")
+    difficulty: Difficulty = Field(Difficulty.NORMAL, description="난이도 (EASY/NORMAL/HARD/VERY_HARD)")
+    metadata_json: Optional[str] = Field(None, description="추가 메타데이터 (JSON 문자열)")
+    preqc: Optional[PreQcInput] = Field(None, description="Pre-QC 입력 데이터")
+    wwl: Optional[str] = Field(None, max_length=50, description="Window Width/Level (예: 350/40)")
+    memo: Optional[str] = Field(None, description="메모")
+    tags: Optional[List[str]] = Field(None, description="태그 목록")
 
 
 class BulkRegisterRequest(BaseModel):
-    cases: list[CaseRegisterItem] = Field(..., min_length=1)
+    """케이스 일괄 등록 요청"""
+    cases: list[CaseRegisterItem] = Field(..., min_length=1, description="등록할 케이스 목록")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "cases": [
+                        {
+                            "case_uid": "CASE_001",
+                            "project_name": "Project_A",
+                            "part_name": "Abdomen",
+                            "hospital": "Hospital_A",
+                            "difficulty": "NORMAL",
+                        },
+                        {
+                            "case_uid": "CASE_002",
+                            "project_name": "Project_A",
+                            "part_name": "Chest",
+                            "hospital": "Hospital_B",
+                            "difficulty": "HARD",
+                        },
+                    ]
+                }
+            ]
+        }
+    }
 
 
 class BulkRegisterResponse(BaseModel):
-    created_count: int
-    skipped_count: int
-    created_case_uids: list[str]
-    skipped_case_uids: list[str]
+    """케이스 일괄 등록 응답"""
+    created_count: int = Field(..., description="생성된 케이스 수")
+    skipped_count: int = Field(..., description="건너뛴 케이스 수 (이미 존재)")
+    created_case_uids: list[str] = Field(..., description="생성된 케이스 UID 목록")
+    skipped_case_uids: list[str] = Field(..., description="건너뛴 케이스 UID 목록")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "created_count": 2,
+                    "skipped_count": 0,
+                    "created_case_uids": ["CASE_001", "CASE_002"],
+                    "skipped_case_uids": [],
+                }
+            ]
+        }
+    }
 
 
 # Assignment
 class AssignRequest(BaseModel):
-    case_id: int
-    user_id: int
+    """케이스 할당 요청"""
+    case_id: int = Field(..., description="할당할 케이스 ID")
+    user_id: int = Field(..., description="할당받을 사용자 ID")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{"case_id": 1, "user_id": 2}]
+        }
+    }
 
 
 class AssignResponse(BaseModel):
-    case_id: int
-    case_uid: str
-    assigned_user_id: int
-    assigned_username: str
+    """케이스 할당 응답"""
+    case_id: int = Field(..., description="케이스 ID")
+    case_uid: str = Field(..., description="케이스 UID")
+    assigned_user_id: int = Field(..., description="할당된 사용자 ID")
+    assigned_username: str = Field(..., description="할당된 사용자명")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "case_id": 1,
+                    "case_uid": "CASE_001",
+                    "assigned_user_id": 2,
+                    "assigned_username": "worker1",
+                }
+            ]
+        }
+    }
 
 
 # Event
 class EventCreateRequest(BaseModel):
-    case_id: int
-    event_type: EventType
-    idempotency_key: str = Field(..., min_length=1, max_length=100)
-    event_code: Optional[str] = Field(None, max_length=50)
-    payload_json: Optional[str] = None
-    expected_revision: Optional[int] = None  # For optimistic locking
+    """이벤트 생성 요청"""
+    case_id: int = Field(..., description="케이스 ID")
+    event_type: EventType = Field(..., description="이벤트 유형")
+    idempotency_key: str = Field(..., min_length=1, max_length=100, description="멱등성 키 (중복 방지)")
+    event_code: Optional[str] = Field(None, max_length=50, description="이벤트 코드")
+    payload_json: Optional[str] = Field(None, description="추가 페이로드 (JSON)")
+    expected_revision: Optional[int] = Field(None, description="낙관적 락용 예상 revision")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "case_id": 1,
+                    "event_type": "ACCEPTED",
+                    "idempotency_key": "accept-case1-20240115-001",
+                    "expected_revision": 3,
+                }
+            ]
+        }
+    }
 
 
 class EventResponse(BaseModel):
-    id: int
-    case_id: int
-    user_id: int
-    event_type: EventType
-    idempotency_key: str
-    event_code: Optional[str]
-    payload_json: Optional[str]
-    created_at: datetime
-    case_status: CaseStatus
-    case_revision: int
+    """이벤트 응답"""
+    id: int = Field(..., description="이벤트 ID")
+    case_id: int = Field(..., description="케이스 ID")
+    user_id: int = Field(..., description="이벤트 생성자 ID")
+    event_type: EventType = Field(..., description="이벤트 유형")
+    idempotency_key: str = Field(..., description="멱등성 키")
+    event_code: Optional[str] = Field(None, description="이벤트 코드")
+    payload_json: Optional[str] = Field(None, description="추가 페이로드")
+    created_at: datetime = Field(..., description="생성 시각")
+    case_status: CaseStatus = Field(..., description="변경 후 케이스 상태")
+    case_revision: int = Field(..., description="변경 후 케이스 revision")
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True,
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": 10,
+                    "case_id": 1,
+                    "user_id": 1,
+                    "event_type": "ACCEPTED",
+                    "idempotency_key": "accept-case1-20240115-001",
+                    "event_code": None,
+                    "payload_json": None,
+                    "created_at": "2024-01-15T14:30:00",
+                    "case_status": "ACCEPTED",
+                    "case_revision": 4,
+                }
+            ]
+        },
+    }
 
 
 # Case List
@@ -256,20 +362,45 @@ class UserListResponse(BaseModel):
 
 # WorkLog
 class WorkLogCreateRequest(BaseModel):
-    case_id: int
-    action_type: ActionType
-    reason_code: Optional[str] = Field(None, max_length=50)
+    """작업 로그 생성 요청"""
+    case_id: int = Field(..., description="케이스 ID")
+    action_type: ActionType = Field(..., description="작업 유형 (START/PAUSE/RESUME)")
+    reason_code: Optional[str] = Field(None, max_length=50, description="사유 코드 (PAUSE 시)")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"case_id": 1, "action_type": "START"},
+                {"case_id": 1, "action_type": "PAUSE", "reason_code": "BREAK"},
+            ]
+        }
+    }
 
 
 class WorkLogResponse(BaseModel):
-    id: int
-    case_id: int
-    user_id: int
-    action_type: ActionType
-    reason_code: Optional[str]
-    timestamp: datetime
+    """작업 로그 응답"""
+    id: int = Field(..., description="WorkLog ID")
+    case_id: int = Field(..., description="케이스 ID")
+    user_id: int = Field(..., description="사용자 ID")
+    action_type: ActionType = Field(..., description="작업 유형")
+    reason_code: Optional[str] = Field(None, description="사유 코드")
+    timestamp: datetime = Field(..., description="기록 시각")
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True,
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": 5,
+                    "case_id": 1,
+                    "user_id": 2,
+                    "action_type": "START",
+                    "reason_code": None,
+                    "timestamp": "2024-01-15T09:00:00",
+                }
+            ]
+        },
+    }
 
 
 class WorkLogItem(BaseModel):
@@ -285,12 +416,23 @@ class WorkLogItem(BaseModel):
 
 # TimeOff
 class TimeOffCreateRequest(BaseModel):
+    """휴가 등록 요청"""
     user_id: int
     date: date
     type: TimeOffType
 
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"user_id": 2, "date": "2024-01-20", "type": "VACATION"},
+                {"user_id": 2, "date": "2024-01-21", "type": "HALF_DAY"},
+            ]
+        }
+    }
+
 
 class TimeOffResponse(BaseModel):
+    """휴가 응답"""
     id: int
     user_id: int
     username: str
@@ -298,21 +440,57 @@ class TimeOffResponse(BaseModel):
     type: TimeOffType
     created_at: datetime
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True,
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": 1,
+                    "user_id": 2,
+                    "username": "worker1",
+                    "date": "2024-01-20",
+                    "type": "VACATION",
+                    "created_at": "2024-01-15T10:00:00",
+                }
+            ]
+        },
+    }
 
 
 class TimeOffListResponse(BaseModel):
+    """휴가 목록 응답"""
     timeoffs: list[TimeOffResponse]
 
 
 # Holidays (WorkCalendar)
 class HolidayUpdateRequest(BaseModel):
-    holidays: list[date] = Field(..., description="List of holiday dates")
+    """공휴일 전체 업데이트 요청"""
+    holidays: list[date] = Field(..., description="공휴일 날짜 목록")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"holidays": ["2024-01-01", "2024-02-09", "2024-02-10", "2024-03-01"]}
+            ]
+        }
+    }
 
 
 class HolidayListResponse(BaseModel):
-    holidays: list[date]
-    timezone: str
+    """공휴일 목록 응답"""
+    holidays: list[date] = Field(..., description="공휴일 날짜 목록")
+    timezone: str = Field(..., description="타임존")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "holidays": ["2024-01-01", "2024-02-09", "2024-02-10", "2024-03-01"],
+                    "timezone": "Asia/Seoul",
+                }
+            ]
+        }
+    }
 
 
 # Capacity Metrics
@@ -339,22 +517,52 @@ class TeamCapacityResponse(BaseModel):
 
 # Submit (atomic WorkLog SUBMIT + Event SUBMITTED)
 class SubmitRequest(BaseModel):
-    case_id: int
-    idempotency_key: str = Field(..., min_length=1, max_length=100)
-    expected_revision: Optional[int] = None
+    """케이스 제출 요청"""
+    case_id: int = Field(..., description="제출할 케이스 ID")
+    idempotency_key: str = Field(..., min_length=1, max_length=100, description="멱등성 키")
+    expected_revision: Optional[int] = Field(None, description="낙관적 락용 예상 revision")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "case_id": 1,
+                    "idempotency_key": "submit-case1-20240115-001",
+                    "expected_revision": 2,
+                }
+            ]
+        }
+    }
 
 
 class SubmitResponse(BaseModel):
-    worklog_id: int
-    event_id: int
-    case_id: int
-    case_status: CaseStatus
-    case_revision: int
-    work_seconds: int
-    work_duration: str
-    man_days: float
+    """케이스 제출 응답"""
+    worklog_id: int = Field(..., description="생성된 WorkLog ID")
+    event_id: int = Field(..., description="생성된 Event ID")
+    case_id: int = Field(..., description="케이스 ID")
+    case_status: CaseStatus = Field(..., description="변경 후 케이스 상태")
+    case_revision: int = Field(..., description="변경 후 revision")
+    work_seconds: int = Field(..., description="총 작업 시간 (초)")
+    work_duration: str = Field(..., description="작업 시간 (포맷팅)")
+    man_days: float = Field(..., description="공수 (Man-Days, 8시간=1MD)")
 
-    model_config = {"from_attributes": True}
+    model_config = {
+        "from_attributes": True,
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "worklog_id": 15,
+                    "event_id": 12,
+                    "case_id": 1,
+                    "case_status": "SUBMITTED",
+                    "case_revision": 3,
+                    "work_seconds": 3600,
+                    "work_duration": "1시간 0분",
+                    "man_days": 0.125,
+                }
+            ]
+        },
+    }
 
 
 # Case metrics (for detail view)

@@ -4,11 +4,34 @@ All state changes go through Event-based transitions.
 WorkLog handles time tracking separately.
 """
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import update
 from sqlalchemy.orm import Session
+
+
+@contextmanager
+def safe_begin(db: Session):
+    """
+    Context manager for safe transaction handling.
+    If a transaction is already active (e.g., in tests with SAVEPOINT),
+    uses begin_nested() for nested transaction support.
+    Otherwise, uses regular begin().
+
+    This ensures compatibility with pytest fixtures that use SAVEPOINT
+    for test isolation while maintaining normal behavior in production.
+    """
+    if db.in_transaction():
+        # Already in transaction (e.g., test environment with SAVEPOINT)
+        # Use nested transaction to work with existing transaction
+        with db.begin_nested():
+            yield
+    else:
+        # Normal case: start a new transaction
+        with safe_begin(db):
+            yield
 
 from config import TIMEZONE
 
@@ -289,7 +312,7 @@ def bulk_register_cases(
     created_uids: list[str] = []
     skipped_uids: list[str] = []
 
-    with db.begin():
+    with safe_begin(db):
         for item in request.cases:
             existing = db.query(Case).filter(Case.case_uid == item.case_uid).first()
             if existing:
@@ -346,7 +369,7 @@ def assign_case(
     if current_user.role != UserRole.ADMIN:
         raise ForbiddenError("Only ADMIN can assign cases")
 
-    with db.begin():
+    with safe_begin(db):
         case = db.query(Case).filter(Case.id == request.case_id).first()
         if not case:
             raise NotFoundError(f"Case {request.case_id} not found")
@@ -380,7 +403,7 @@ def process_event(
     Uses idempotency key and optimistic locking.
     Note: For STARTED/SUBMITTED, prefer using WorkLog-based functions.
     """
-    with db.begin():
+    with safe_begin(db):
         existing_event = (
             db.query(Event)
             .filter(Event.idempotency_key == request.idempotency_key)
@@ -476,7 +499,7 @@ def create_worklog(
     Create a worklog entry.
     Handles START with WIP limit check and Event creation.
     """
-    with db.begin():
+    with safe_begin(db):
         case = db.query(Case).filter(Case.id == request.case_id).first()
         if not case:
             raise NotFoundError(f"Case {request.case_id} not found")
@@ -560,7 +583,7 @@ def submit_case(
     Submit a case atomically.
     Creates WorkLog SUBMIT + Event SUBMITTED in one transaction.
     """
-    with db.begin():
+    with safe_begin(db):
         # Check idempotency
         existing_event = (
             db.query(Event)
@@ -941,7 +964,7 @@ def create_review_note(
     if current_user.role != UserRole.ADMIN:
         raise ForbiddenError("Only ADMIN can create review notes")
 
-    with db.begin():
+    with safe_begin(db):
         case = db.query(Case).filter(Case.id == request.case_id).first()
         if not case:
             raise NotFoundError(f"Case {request.case_id} not found")
@@ -1001,7 +1024,7 @@ def create_timeoff(
     Create a time-off entry.
     ADMIN can create for any user, WORKER can only create for self.
     """
-    with db.begin():
+    with safe_begin(db):
         # Permission check
         if current_user.role == UserRole.WORKER:
             if request.user_id != current_user.id:
@@ -1043,7 +1066,7 @@ def delete_timeoff(db: Session, timeoff_id: int, current_user: User) -> None:
     Delete a time-off entry.
     ADMIN can delete any, WORKER can only delete their own.
     """
-    with db.begin():
+    with safe_begin(db):
         timeoff = db.query(UserTimeOff).filter(UserTimeOff.id == timeoff_id).first()
         if not timeoff:
             raise NotFoundError(f"TimeOff {timeoff_id} not found")
@@ -1158,7 +1181,7 @@ def update_holidays(
     if current_user.role != UserRole.ADMIN:
         raise ForbiddenError("Only ADMIN can update holidays")
 
-    with db.begin():
+    with safe_begin(db):
         calendar = get_work_calendar(db)
 
         # Convert dates to strings for JSON storage
@@ -1179,7 +1202,7 @@ def add_holiday(db: Session, holiday_date: "date", current_user: User) -> Holida
     if current_user.role != UserRole.ADMIN:
         raise ForbiddenError("Only ADMIN can add holidays")
 
-    with db.begin():
+    with safe_begin(db):
         calendar = get_work_calendar(db)
         holidays_list = json.loads(calendar.holidays_json)
 
@@ -1201,7 +1224,7 @@ def remove_holiday(db: Session, holiday_date: "date", current_user: User) -> Hol
     if current_user.role != UserRole.ADMIN:
         raise ForbiddenError("Only ADMIN can remove holidays")
 
-    with db.begin():
+    with safe_begin(db):
         calendar = get_work_calendar(db)
         holidays_list = json.loads(calendar.holidays_json)
 
@@ -1310,7 +1333,7 @@ def save_preqc_summary(
     NOTE: Server does NOT run Pre-QC - it only stores the summary.
     The actual QC runs on local PC (offline-first, cost=0).
     """
-    with db.begin():
+    with safe_begin(db):
         case = db.query(Case).filter(Case.id == request.case_id).first()
         if not case:
             raise NotFoundError(f"Case {request.case_id} not found")
@@ -1472,7 +1495,7 @@ def save_autoqc_summary(
     NOTE: Server does NOT run Auto-QC - it only stores the summary.
     The actual QC runs on local PC (offline-first, cost=0).
     """
-    with db.begin():
+    with safe_begin(db):
         case = db.query(Case).filter(Case.id == request.case_id).first()
         if not case:
             raise NotFoundError(f"Case {request.case_id} not found")
@@ -1782,7 +1805,7 @@ def apply_tags(
     skipped_count = 0
     not_found_count = 0
 
-    with db.begin():
+    with safe_begin(db):
         for case_uid in request.case_uids:
             case = db.query(Case).filter(Case.case_uid == case_uid).first()
             if not case:
@@ -1822,7 +1845,7 @@ def remove_tags(
 
     removed_count = 0
 
-    with db.begin():
+    with safe_begin(db):
         for case_uid in request.case_uids:
             case = db.query(Case).filter(Case.case_uid == case_uid).first()
             if not case:
@@ -1903,7 +1926,7 @@ def create_definition_snapshot(
     except json.JSONDecodeError:
         raise ValidationError("content_json must be valid JSON")
 
-    with db.begin():
+    with safe_begin(db):
         # Check for duplicate version name
         existing = db.query(DefinitionSnapshot).filter(
             DefinitionSnapshot.version_name == request.version_name
@@ -1976,7 +1999,7 @@ def link_project_definition(
     if current_user.role != UserRole.ADMIN:
         raise ForbiddenError("Only ADMIN can link project definitions")
 
-    with db.begin():
+    with safe_begin(db):
         project = db.query(Project).filter(Project.id == request.project_id).first()
         if not project:
             raise NotFoundError(f"Project {request.project_id} not found")

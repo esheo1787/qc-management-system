@@ -63,6 +63,8 @@ from database import SessionLocal
 from metrics import (
     compute_capacity_metrics,
     compute_man_days,
+    compute_monthly_performance,
+    compute_performance_stats,
     compute_timeline,
     compute_work_seconds,
     count_workdays,
@@ -266,6 +268,133 @@ STATUS_OPTIONS = [
     CaseStatus.ACCEPTED.value,
 ]
 
+# ============================================================
+# 테이블 동적 높이 계산 (공통 헬퍼)
+# ============================================================
+
+# 상수 정의
+TABLE_ROW_HEIGHT = 35  # 행 높이 (px)
+TABLE_HEADER_HEIGHT = 40  # 헤더 높이 (px)
+TABLE_FOOTER_HEIGHT = 50  # 페이지네이션 영역 높이 (px)
+TABLE_MIN_ROWS = 5  # 최소 표시 행 수
+TABLE_DEFAULT_PAGE_SIZE = 25  # 기본 페이지 사이즈
+
+# st.dataframe용 상수 (페이지네이션 없음)
+DATAFRAME_ROW_HEIGHT = 35  # 행 높이 (px)
+DATAFRAME_HEADER_HEIGHT = 38  # 헤더 높이 (px)
+DATAFRAME_PADDING = 10  # 상하 여백 (px)
+
+
+def calculate_table_height(
+    row_count: int,
+    page_size: int = TABLE_DEFAULT_PAGE_SIZE,
+    min_rows: int = TABLE_MIN_ROWS,
+) -> int:
+    """
+    테이블 행 수에 따른 동적 높이 계산 (AgGrid용).
+
+    - row_count < page_size: 행 수에 맞춰 높이 축소
+    - row_count >= page_size: 고정 높이 (page_size 기준)
+    - 최소 높이는 min_rows 기준으로 유지
+
+    Args:
+        row_count: 현재 표시할 데이터 행 수
+        page_size: 페이지당 최대 행 수 (기본 25)
+        min_rows: 최소 표시 행 수 (기본 5)
+
+    Returns:
+        계산된 테이블 높이 (px)
+    """
+    # 표시할 행 수 결정
+    display_rows = min(row_count, page_size)
+
+    # 최소 행 수 보장
+    display_rows = max(display_rows, min_rows)
+
+    # 높이 계산: 헤더 + (행 수 * 행 높이) + 푸터
+    height = TABLE_HEADER_HEIGHT + (display_rows * TABLE_ROW_HEIGHT) + TABLE_FOOTER_HEIGHT
+
+    return height
+
+
+def calculate_dataframe_height(
+    row_count: int,
+    max_rows: int = 10,
+    min_rows: int = 3,
+) -> int:
+    """
+    st.dataframe용 동적 높이 계산.
+
+    - row_count < max_rows: 행 수에 맞춰 높이 축소
+    - row_count >= max_rows: 고정 높이 (max_rows 기준)
+    - 최소 높이는 min_rows 기준으로 유지
+
+    Args:
+        row_count: 현재 표시할 데이터 행 수
+        max_rows: 최대 표시 행 수 (기본 10)
+        min_rows: 최소 표시 행 수 (기본 3)
+
+    Returns:
+        계산된 테이블 높이 (px)
+    """
+    # 표시할 행 수 결정
+    display_rows = min(row_count, max_rows)
+
+    # 최소 행 수 보장
+    display_rows = max(display_rows, min_rows)
+
+    # 높이 계산: 헤더 + (행 수 * 행 높이) + 여백
+    height = DATAFRAME_HEADER_HEIGHT + (display_rows * DATAFRAME_ROW_HEIGHT) + DATAFRAME_PADDING
+
+    return height
+
+
+# ============================================================
+# 테이블 렌더 SSOT (Single Source of Truth)
+# 모든 테이블은 이 두 함수를 통해서만 렌더링됨
+# ============================================================
+
+def render_table_df(
+    df: pd.DataFrame,
+    *,
+    height: int = None,
+    max_rows: int = 10,
+    min_rows: int = 3,
+    hide_index: bool = True,
+    use_container_width: bool = True,
+    key: str = None,
+) -> None:
+    """
+    st.dataframe 기반 테이블 렌더링 (SSOT).
+    보조/요약 테이블용. 페이지네이션 없음.
+
+    Args:
+        df: 표시할 데이터프레임
+        height: 테이블 높이 (None이면 자동 계산)
+        max_rows: 최대 표시 행 수 (기본 10)
+        min_rows: 최소 표시 행 수 (기본 3)
+        hide_index: 인덱스 숨김 여부
+        use_container_width: 컨테이너 너비 사용
+        key: 위젯 키
+    """
+    if df.empty:
+        st.info("표시할 데이터가 없습니다.")
+        return
+
+    row_count = len(df)
+
+    # 높이 자동 계산 (height가 None일 때만)
+    calculated_height = height if height is not None else calculate_dataframe_height(row_count, max_rows, min_rows)
+
+    st.dataframe(
+        df,
+        height=calculated_height,
+        hide_index=hide_index,
+        use_container_width=use_container_width,
+        key=key,
+    )
+
+
 # 테이블 컬럼 라벨 (공통)
 UI_LABELS = {
     "id": "번호",
@@ -296,12 +425,13 @@ UI_LABELS = {
 def render_styled_dataframe(
     df: pd.DataFrame,
     key: str = None,
-    height: int = 400,
+    height: int = None,
     hide_columns: list = None,
     enable_selection: bool = True,
     show_toolbar: bool = True,
     pinnable_columns: list = None,
     user_role: str = None,
+    page_size: int = TABLE_DEFAULT_PAGE_SIZE,
 ) -> dict:
     """
     AG Grid 기반 테이블 렌더링.
@@ -310,16 +440,18 @@ def render_styled_dataframe(
     - 왼쪽 정렬
     - 메뉴/정렬 아이콘 제거
     - 툴바: CSV 내보내기, 컬럼 숨기기/고정
+    - 행 수에 따른 동적 높이 조절
 
     Args:
         df: 데이터프레임
         key: 위젯 키
-        height: 테이블 높이
+        height: 테이블 높이 (None이면 행 수에 따라 자동 계산)
         hide_columns: 숨길 컬럼 리스트 (코드에서 강제 숨김)
         enable_selection: 행 선택 활성화 여부
         show_toolbar: 툴바 표시 여부
         pinnable_columns: 고정 가능한 컬럼 리스트 (None이면 모든 컬럼)
         user_role: 사용자 역할 (admin/worker) - 설정 저장용
+        page_size: 페이지당 행 수 (기본 25)
 
     Returns:
         grid_response (enable_selection=True) 또는 None
@@ -505,12 +637,20 @@ def render_styled_dataframe(
     if enable_selection:
         gb.configure_selection(selection_mode="single", use_checkbox=False)
 
-    gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=25)
+    gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
 
     grid_options = gb.build()
 
     # Page Size 옵션 설정
     grid_options["paginationPageSizeSelector"] = [25, 50, 100]
+
+    # 동적 높이 계산 (height가 None이면 자동 계산)
+    row_count = len(display_df)
+    calculated_height = height if height is not None else calculate_table_height(row_count, page_size)
+
+    # 행 수가 page_size보다 적을 때 자동 높이 적용 (빈 공간 제거)
+    if row_count < page_size:
+        grid_options["domLayout"] = "autoHeight"
 
     # columnDefs 강제 덮어쓰기 (메뉴/정렬 완전 제거 + 왼쪽 정렬)
     for col in grid_options.get("columnDefs", []):
@@ -561,7 +701,7 @@ def render_styled_dataframe(
         update_mode=GridUpdateMode.MODEL_CHANGED,
         fit_columns_on_grid_load=False,
         allow_unsafe_jscode=True,
-        height=height,
+        height=calculated_height,
         key=key,
         theme="streamlit",
         custom_css=custom_css,
@@ -778,12 +918,17 @@ def render_cases_aggrid(
     df: pd.DataFrame,
     grid_key: str,
     show_assignee: bool = True,
-    height: int = 400,
+    height: int = None,
     enable_filter: bool = True,
+    page_size: int = TABLE_DEFAULT_PAGE_SIZE,
 ) -> dict:
     if df.empty:
         st.info("표시할 데이터가 없습니다.")
         return None
+
+    # 동적 높이 계산 (height가 None이면 행 수에 따라 자동 계산)
+    row_count = len(df)
+    calculated_height = height if height is not None else calculate_table_height(row_count, page_size)
 
     gb = GridOptionsBuilder.from_dataframe(df)
 
@@ -827,12 +972,16 @@ def render_cases_aggrid(
 
     gb.configure_selection(selection_mode="single", use_checkbox=False)
 
-    gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=25)
+    gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
 
     grid_options = gb.build()
 
     # Page Size 옵션 설정
     grid_options["paginationPageSizeSelector"] = [25, 50, 100]
+
+    # 행 수가 page_size보다 적을 때 자동 높이 적용 (빈 공간 제거)
+    if row_count < page_size:
+        grid_options["domLayout"] = "autoHeight"
 
     # columnDefs 강제 덮어쓰기 (가운데 헤더 + 필터 설정 반영)
     for col in grid_options.get("columnDefs", []):
@@ -882,7 +1031,7 @@ def render_cases_aggrid(
         update_mode=GridUpdateMode.MODEL_CHANGED,
         fit_columns_on_grid_load=False,  # 우리가 JS로 컨트롤
         allow_unsafe_jscode=True,
-        height=height,
+        height=calculated_height,
         key=grid_key,
         theme="streamlit",
         custom_css=custom_css,
@@ -1530,12 +1679,45 @@ def show_worker_case_detail(db: Session, case: Case, user: dict, wip_limit: int,
             else:
                 st.caption("Auto-QC 데이터 없음")
 
+    # ========== 검수자 판정 결과 표시 (ACCEPTED/REWORK인 경우) ==========
+    if case.status in [CaseStatus.ACCEPTED, CaseStatus.REWORK]:
+        reviewer_fb = db.query(ReviewerQcFeedback).filter(
+            ReviewerQcFeedback.case_id == case.id
+        ).order_by(ReviewerQcFeedback.created_at.desc()).first()
+
+        st.markdown("---")
+        status_label = "✅ 승인됨" if case.status == CaseStatus.ACCEPTED else "🔄 재작업 요청"
+        st.markdown(f"#### 검수 결과: {status_label}")
+
+        if reviewer_fb:
+            fb_time = reviewer_fb.created_at.strftime('%Y-%m-%d %H:%M')
+            st.caption(f"검수 일시: {fb_time}")
+
+            if reviewer_fb.has_disagreement:
+                disagreement_type = reviewer_fb.disagreement_type or "N/A"
+                disagreement_label = "놓친 문제 (Missed)" if disagreement_type == "MISSED" else "잘못된 경고 (False Alarm)" if disagreement_type == "FALSE_ALARM" else disagreement_type
+                st.warning(f"불일치 유형: {disagreement_label}")
+                if reviewer_fb.disagreement_segments_json:
+                    try:
+                        segments = json.loads(reviewer_fb.disagreement_segments_json)
+                        if segments:
+                            st.caption(f"세그먼트: {', '.join(segments)}")
+                    except json.JSONDecodeError:
+                        pass
+                if reviewer_fb.disagreement_detail:
+                    st.caption(f"상세: {reviewer_fb.disagreement_detail}")
+
+            if reviewer_fb.review_memo:
+                st.info(f"📝 검수자 코멘트: {reviewer_fb.review_memo}")
+        else:
+            st.caption("검수자 피드백 없음")
+
     # ========== 기존 QC 피드백 목록 표시 (수정/삭제 가능) ==========
     if autoqc:
         existing_feedbacks = get_case_feedbacks(db, case.id)
         if existing_feedbacks:
             st.markdown("---")
-            st.markdown("#### 내 QC 피드백 목록")
+            st.markdown("#### 수정 내역")
 
             for fb in existing_feedbacks:
                 # 각 피드백에 대해 수정 모드 상태 관리
@@ -1748,19 +1930,33 @@ def show_worker_case_detail(db: Session, case: Case, user: dict, wip_limit: int,
                 for i, fix in enumerate(st.session_state[additional_fixes_key]):
                     col1, col2 = st.columns([5, 1])
                     with col1:
-                        st.write(f"• **{fix.get('segment', '')}**: {fix.get('description', '')}")
+                        fix_type = fix.get('fix_type', '')
+                        type_label = "🔴 놓침" if fix_type == "missed" else "🟡 잘못된 경고" if fix_type == "false_alarm" else ""
+                        st.write(f"• {type_label} **{fix.get('segment', '')}**: {fix.get('description', '')}")
                     with col2:
                         if st.button("삭제", key=f"del_addfix_{case.id}_{i}"):
                             st.session_state[additional_fixes_key].pop(i)
                             st.rerun()
 
             # 새 항목 입력
-            add_col1, add_col2, add_col3 = st.columns([2, 3, 1])
+            add_fix_type_key = f"add_fix_type_{case.id}"
+            if add_fix_type_key not in st.session_state:
+                st.session_state[add_fix_type_key] = "missed"
+
+            add_col1, add_col2, add_col3, add_col4 = st.columns([1.5, 2, 2.5, 1])
             with add_col1:
-                segment_input = st.text_input("세그먼트", key=add_fix_segment_key, placeholder="예: Renal_Artery")
+                fix_type_options = {"놓침 (Missed)": "missed", "잘못된 경고 (False Alarm)": "false_alarm"}
+                selected_type_label = st.selectbox(
+                    "수정 유형",
+                    options=list(fix_type_options.keys()),
+                    key=add_fix_type_key + "_select",
+                )
+                selected_fix_type = fix_type_options[selected_type_label]
             with add_col2:
-                desc_input = st.text_input("설명", key=add_fix_desc_key, placeholder="예: 구멍 메움")
+                segment_input = st.text_input("세그먼트", key=add_fix_segment_key, placeholder="예: Renal_Artery")
             with add_col3:
+                desc_input = st.text_input("설명", key=add_fix_desc_key, placeholder="예: 구멍 메움")
+            with add_col4:
                 st.write("")  # 간격 맞춤
                 if st.button("추가", key=f"add_fix_btn_{case.id}"):
                     seg = st.session_state.get(add_fix_segment_key, "").strip()
@@ -1769,6 +1965,7 @@ def show_worker_case_detail(db: Session, case: Case, user: dict, wip_limit: int,
                         st.session_state[additional_fixes_key].append({
                             "segment": seg,
                             "description": desc,
+                            "fix_type": selected_fix_type,
                         })
                         # 플래그 설정 후 rerun (다음 사이클에서 입력 필드 초기화)
                         st.session_state[clear_add_fix_key] = True
@@ -1821,7 +2018,7 @@ def show_worker_case_detail(db: Session, case: Case, user: dict, wip_limit: int,
                 st.warning("이 작업을 시작하시겠습니까?")
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    if st.button("예, 시작", key=f"confirm_yes_{case.id}", type="primary"):
+                    if st.button("시작", key=f"confirm_yes_{case.id}", type="primary"):
                         now = datetime.now(TIMEZONE)
                         action_type = ActionType.REWORK_START if case.status == CaseStatus.REWORK else ActionType.START
 
@@ -1941,7 +2138,13 @@ def show_worker_case_detail(db: Session, case: Case, user: dict, wip_limit: int,
                         if memo and memo.strip():
                             st.caption(f"- 메모: {memo.strip()[:50]}...")
 
-                    if st.button("예, 제출", key=f"confirm_yes_submit_{case.id}", type="primary"):
+                    col_submit, col_cancel = st.columns(2)
+                    with col_submit:
+                        submit_clicked = st.button("제출", key=f"confirm_yes_submit_{case.id}", type="primary")
+                    with col_cancel:
+                        cancel_clicked = st.button("취소", key=f"cancel_submit_{case.id}")
+
+                    if submit_clicked:
                         now = datetime.now(TIMEZONE)
 
                         # Phase 4: 확장된 QC 피드백 저장
@@ -2009,7 +2212,7 @@ def show_worker_case_detail(db: Session, case: Case, user: dict, wip_limit: int,
 
                         st.success(f"제출 완료! 총 작업시간: {final_duration} ({final_md:.2f} MD)")
                         st.rerun()
-                    if st.button("제출 취소", key=f"cancel_submit_{case.id}"):
+                    if cancel_clicked:
                         st.session_state[submit_key] = False
                         st.rerun()
 
@@ -2248,7 +2451,7 @@ def show_register_case(db: Session, user: dict):
                 df["중복"] = df["case_uid"].isin(existing_uids)
 
                 # 미리보기
-                st.dataframe(df, use_container_width=True)
+                render_table_df(df, max_rows=15)
                 dup_count = df["중복"].sum()
                 new_count = len(df) - dup_count
                 st.caption(f"총 {len(df)}건 | 신규: {new_count}건 | 중복(건너뜀): {dup_count}건")
@@ -2486,7 +2689,7 @@ def show_review_queue(db: Session, user: dict):
                 total_issues = len(issues)
                 fixed_count = sum(1 for i, issue in enumerate(issues) if qc_fixes_map.get(i, {}).get("fixed", False) or qc_fixes_map.get(issue.get("segment", ""), {}).get("fixed", False))
 
-                st.markdown("**📋 Auto-QC 이슈 목록 (수정 현황):**")
+                st.markdown("**📋 Auto-QC 이슈 목록 (작업자 수정 → 검수자 확인):**")
                 with st.container(border=True):
                     if issues:
                         severity_icons = {"WARN": "⚠️", "INCOMPLETE": "❌", "INFO": "ℹ️"}
@@ -2497,26 +2700,49 @@ def show_review_queue(db: Session, user: dict):
                             code = issue.get("code", "")
                             sev_icon = severity_icons.get(level, "•")
 
-                            # 수정 여부 확인 (index 또는 segment로 매칭)
+                            # 작업자 수정 여부 확인 (index 또는 segment로 매칭)
                             is_fixed = qc_fixes_map.get(i, {}).get("fixed", False) or qc_fixes_map.get(segment, {}).get("fixed", False)
-                            fix_icon = "✅" if is_fixed else "❌"
+                            fix_status = "수정완료" if is_fixed else "미수정"
 
-                            # 표시 형식: ✅ ⚠️ WARN: IVC - 이름 불일치
-                            st.markdown(f"{fix_icon} {sev_icon} {level}: {segment} - {msg}")
+                            # 검수자 확인 체크박스 (session_state 전용)
+                            reviewer_check_key = f"reviewer_check_{case.id}_{i}"
+                            col_check, col_info = st.columns([1, 5])
+                            with col_check:
+                                st.checkbox(
+                                    "확인",
+                                    key=reviewer_check_key,
+                                    label_visibility="collapsed"
+                                )
+                            with col_info:
+                                fix_icon = "✅" if is_fixed else "❌"
+                                st.markdown(f"{fix_icon} {sev_icon} {level}: {segment} - {msg} [{fix_status}]")
                     else:
                         st.caption("이슈 없음")
 
                     # 범례
-                    st.caption("✅ = 작업자가 수정완료 체크함 / ❌ = 미수정")
+                    st.caption("체크박스 = 검수자 확인용 / ✅ = 작업자 수정완료 / ❌ = 작업자 미수정")
 
                 # 추가 수정 사항 (QC에 없던 것)
                 if additional_fixes:
                     st.markdown("**📋 추가 수정 사항 (QC에 없던 것):**")
                     with st.container(border=True):
-                        for fix in additional_fixes:
+                        for idx, fix in enumerate(additional_fixes):
                             seg = fix.get("segment", "")
                             desc = fix.get("description", "")
-                            st.markdown(f"- {seg}: {desc}")
+                            fix_type = fix.get("fix_type", "")
+                            type_label = "🔴 놓침" if fix_type == "missed" else "🟡 잘못된 경고" if fix_type == "false_alarm" else ""
+
+                            # 검수자 확인 체크박스
+                            reviewer_addfix_check_key = f"reviewer_addfix_check_{case.id}_{idx}"
+                            col_check, col_info = st.columns([1, 5])
+                            with col_check:
+                                st.checkbox(
+                                    "확인",
+                                    key=reviewer_addfix_check_key,
+                                    label_visibility="collapsed"
+                                )
+                            with col_info:
+                                st.markdown(f"{type_label} {seg}: {desc}")
 
                 # 작업자 메모
                 if worker_memo:
@@ -2563,33 +2789,91 @@ def show_review_queue(db: Session, user: dict):
 
             # ====== 검수자 Auto-QC 불일치 기록 섹션 ======
             if autoqc:
+                st.markdown("**Auto-QC 불일치 기록**")
+
                 # 기존 불일치 기록 로드
                 existing_reviewer_fb = db.query(ReviewerQcFeedback).filter(
                     ReviewerQcFeedback.case_id == case.id,
                     ReviewerQcFeedback.reviewer_id == user["id"]
                 ).first()
 
-                disagree_key = f"disagree_check_{case.id}"
-                disagree_expanded_key = f"disagree_expanded_{case.id}"
+                # 세션 키 정의
+                edit_mode_key = f"disagree_edit_mode_{case.id}"
+                add_mode_key = f"disagree_add_mode_{case.id}"
 
-                # 세션 초기화
-                if disagree_key not in st.session_state:
-                    st.session_state[disagree_key] = existing_reviewer_fb.has_disagreement if existing_reviewer_fb else False
-                if disagree_expanded_key not in st.session_state:
-                    st.session_state[disagree_expanded_key] = st.session_state[disagree_key]
+                if edit_mode_key not in st.session_state:
+                    st.session_state[edit_mode_key] = False
+                if add_mode_key not in st.session_state:
+                    st.session_state[add_mode_key] = False
 
-                has_disagree = st.checkbox(
-                    "Auto-QC 결과와 다른 판단입니다",
-                    key=disagree_key,
-                    value=st.session_state[disagree_key]
-                )
+                has_record = existing_reviewer_fb and existing_reviewer_fb.has_disagreement
+                is_editing = st.session_state[edit_mode_key]
+                is_adding = st.session_state[add_mode_key]
 
-                if has_disagree:
+                # 상단 [불일치 추가] 버튼 (편집/추가 모드가 아닐 때만)
+                if not is_editing and not is_adding:
+                    # 기존 기록이 있으면 추가 버튼 비활성화 (case당 1개 제한)
+                    if not has_record:
+                        if st.button("불일치 추가", key=f"add_disagree_btn_{case.id}"):
+                            st.session_state[add_mode_key] = True
+                            st.rerun()
+
+                # 저장된 불일치 기록 목록 표시 (편집/추가 모드가 아닐 때)
+                if has_record and not is_editing and not is_adding:
+                    with st.container(border=True):
+                        # 세그먼트 파싱
+                        segments_str = "-"
+                        if existing_reviewer_fb.disagreement_segments_json:
+                            try:
+                                segments = json.loads(existing_reviewer_fb.disagreement_segments_json)
+                                segments_str = ", ".join(segments) if segments else "-"
+                            except json.JSONDecodeError:
+                                pass
+
+                        # 유형 표시
+                        type_display = "놓친 문제" if existing_reviewer_fb.disagreement_type == "MISSED" else "잘못된 경고"
+
+                        # 테이블 형식으로 표시
+                        col_type, col_detail, col_seg = st.columns([1, 2, 1.5])
+                        with col_type:
+                            st.markdown(f"**유형:** {type_display}")
+                        with col_detail:
+                            st.markdown(f"**상세:** {existing_reviewer_fb.disagreement_detail or '-'}")
+                        with col_seg:
+                            st.markdown(f"**세그먼트:** {segments_str}")
+
+                        # 수정/삭제 버튼
+                        col_edit, col_del, col_space = st.columns([1, 1, 3])
+                        with col_edit:
+                            if st.button("수정", key=f"edit_disagree_{case.id}"):
+                                st.session_state[edit_mode_key] = True
+                                st.rerun()
+                        with col_del:
+                            if st.button("삭제", key=f"delete_disagree_{case.id}"):
+                                existing_reviewer_fb.has_disagreement = False
+                                existing_reviewer_fb.disagreement_type = None
+                                existing_reviewer_fb.disagreement_detail = None
+                                existing_reviewer_fb.disagreement_segments_json = None
+                                db.commit()
+                                st.success("불일치 기록이 삭제되었습니다.")
+                                st.rerun()
+
+                # 기록이 없고 추가 모드도 아닐 때 안내 문구
+                elif not has_record and not is_adding:
+                    st.caption("아직 저장된 불일치 기록이 없습니다.")
+
+                # 불일치 기록 입력 폼 (추가 또는 수정 모드)
+                if is_editing or is_adding:
+                    mode_label = "수정" if is_editing else "추가"
+                    st.info(f"불일치 기록 {mode_label} 중...")
+
                     with st.container(border=True):
                         st.markdown("**불일치 유형:**")
                         disagree_type_options = ["놓친 문제 (PASS였는데 문제 발견)", "잘못된 경고 (WARN/INCOMPLETE였는데 문제 없음)"]
+
+                        # 수정 모드일 때 기존 값으로 초기화
                         default_type_idx = 0
-                        if existing_reviewer_fb and existing_reviewer_fb.disagreement_type == "FALSE_ALARM":
+                        if is_editing and existing_reviewer_fb and existing_reviewer_fb.disagreement_type == "FALSE_ALARM":
                             default_type_idx = 1
 
                         disagree_type = st.radio(
@@ -2600,10 +2884,14 @@ def show_review_queue(db: Session, user: dict):
                             label_visibility="collapsed"
                         )
 
-                        st.markdown("**상세 내용:**")
+                        st.markdown("**상세 내용 (선택):**")
+                        default_detail = ""
+                        if is_editing and existing_reviewer_fb and existing_reviewer_fb.disagreement_detail:
+                            default_detail = existing_reviewer_fb.disagreement_detail
+
                         disagree_detail = st.text_area(
                             "상세 내용",
-                            value=existing_reviewer_fb.disagreement_detail if existing_reviewer_fb else "",
+                            value=default_detail,
                             key=f"disagree_detail_{case.id}",
                             placeholder="어떤 문제를 놓쳤는지 / 왜 문제없는지 입력...",
                             label_visibility="collapsed"
@@ -2612,7 +2900,7 @@ def show_review_queue(db: Session, user: dict):
                         st.markdown("**해당 세그먼트 (선택):**")
                         # 기존 세그먼트 목록 로드
                         existing_segments = []
-                        if existing_reviewer_fb and existing_reviewer_fb.disagreement_segments_json:
+                        if is_editing and existing_reviewer_fb and existing_reviewer_fb.disagreement_segments_json:
                             try:
                                 existing_segments = json.loads(existing_reviewer_fb.disagreement_segments_json)
                             except json.JSONDecodeError:
@@ -2627,41 +2915,47 @@ def show_review_queue(db: Session, user: dict):
                             label_visibility="collapsed"
                         )
 
-                        # 불일치 기록 저장 버튼
-                        if st.button("불일치 기록 저장", key=f"save_disagree_{case.id}"):
-                            # 유형 변환
-                            disagree_type_code = "MISSED" if "놓친 문제" in disagree_type else "FALSE_ALARM"
+                        # 버튼 행
+                        col_save, col_cancel, col_sp = st.columns([1, 1, 3])
 
-                            # 세그먼트 파싱
-                            segments_list = [s.strip() for s in segment_input.split(",") if s.strip()] if segment_input.strip() else []
-                            segments_json = json.dumps(segments_list, ensure_ascii=False) if segments_list else None
+                        with col_save:
+                            if st.button("저장", key=f"save_disagree_{case.id}", type="primary"):
+                                # 유형 변환
+                                disagree_type_code = "MISSED" if "놓친 문제" in disagree_type else "FALSE_ALARM"
 
-                            if existing_reviewer_fb:
-                                # 업데이트
-                                existing_reviewer_fb.has_disagreement = True
-                                existing_reviewer_fb.disagreement_type = disagree_type_code
-                                existing_reviewer_fb.disagreement_detail = disagree_detail.strip() or None
-                                existing_reviewer_fb.disagreement_segments_json = segments_json
-                            else:
-                                # 새로 생성
-                                new_fb = ReviewerQcFeedback(
-                                    case_id=case.id,
-                                    reviewer_id=user["id"],
-                                    has_disagreement=True,
-                                    disagreement_type=disagree_type_code,
-                                    disagreement_detail=disagree_detail.strip() or None,
-                                    disagreement_segments_json=segments_json,
-                                )
-                                db.add(new_fb)
+                                # 세그먼트 파싱
+                                segments_list = [s.strip() for s in segment_input.split(",") if s.strip()] if segment_input.strip() else []
+                                segments_json = json.dumps(segments_list, ensure_ascii=False) if segments_list else None
 
-                            db.commit()
-                            st.success("불일치 기록이 저장되었습니다!")
-                            st.rerun()
-                else:
-                    # 체크 해제 시 기존 기록 있으면 업데이트
-                    if existing_reviewer_fb and existing_reviewer_fb.has_disagreement:
-                        existing_reviewer_fb.has_disagreement = False
-                        db.commit()
+                                if existing_reviewer_fb:
+                                    # 기존 레코드 업데이트
+                                    existing_reviewer_fb.has_disagreement = True
+                                    existing_reviewer_fb.disagreement_type = disagree_type_code
+                                    existing_reviewer_fb.disagreement_detail = disagree_detail.strip() or None
+                                    existing_reviewer_fb.disagreement_segments_json = segments_json
+                                else:
+                                    # 새로 생성
+                                    new_fb = ReviewerQcFeedback(
+                                        case_id=case.id,
+                                        reviewer_id=user["id"],
+                                        has_disagreement=True,
+                                        disagreement_type=disagree_type_code,
+                                        disagreement_detail=disagree_detail.strip() or None,
+                                        disagreement_segments_json=segments_json,
+                                    )
+                                    db.add(new_fb)
+
+                                db.commit()
+                                st.session_state[edit_mode_key] = False
+                                st.session_state[add_mode_key] = False
+                                st.success("불일치 기록이 저장되었습니다!")
+                                st.rerun()
+
+                        with col_cancel:
+                            if st.button("취소", key=f"cancel_disagree_{case.id}"):
+                                st.session_state[edit_mode_key] = False
+                                st.session_state[add_mode_key] = False
+                                st.rerun()
 
             st.markdown("---")
 
@@ -2723,33 +3017,21 @@ def show_review_queue(db: Session, user: dict):
                                 )
                                 db.add(note)
 
-                            # 불일치 기록이 있으면 저장 (잘못된 경고 - WARN/INCOMPLETE인데 승인)
-                            if autoqc and st.session_state.get(f"disagree_check_{case.id}", False):
-                                disagree_type_val = st.session_state.get(f"disagree_type_{case.id}", "")
-                                disagree_type_code = "MISSED" if "놓친 문제" in disagree_type_val else "FALSE_ALARM"
-                                disagree_detail_val = st.session_state.get(f"disagree_detail_{case.id}", "")
-                                segment_input_val = st.session_state.get(f"disagree_segments_{case.id}", "")
-                                segments_list = [s.strip() for s in segment_input_val.split(",") if s.strip()] if segment_input_val else []
-                                segments_json = json.dumps(segments_list, ensure_ascii=False) if segments_list else None
-
+                            # ReviewerQcFeedback에 코멘트 추가 (불일치 기록은 이미 별도 저장됨)
+                            if accept_note.strip():
                                 existing_fb = db.query(ReviewerQcFeedback).filter(
                                     ReviewerQcFeedback.case_id == case.id,
                                     ReviewerQcFeedback.reviewer_id == user["id"]
                                 ).first()
 
                                 if existing_fb:
-                                    existing_fb.has_disagreement = True
-                                    existing_fb.disagreement_type = disagree_type_code
-                                    existing_fb.disagreement_detail = disagree_detail_val.strip() or None
-                                    existing_fb.disagreement_segments_json = segments_json
+                                    existing_fb.review_memo = accept_note.strip()
                                 else:
                                     new_fb = ReviewerQcFeedback(
                                         case_id=case.id,
                                         reviewer_id=user["id"],
-                                        has_disagreement=True,
-                                        disagreement_type=disagree_type_code,
-                                        disagreement_detail=disagree_detail_val.strip() or None,
-                                        disagreement_segments_json=segments_json,
+                                        has_disagreement=False,
+                                        review_memo=accept_note.strip(),
                                     )
                                     db.add(new_fb)
 
@@ -2786,14 +3068,6 @@ def show_review_queue(db: Session, user: dict):
                 else:
                     st.markdown("**재작업 요청:**")
 
-                    # QC summary confirmed checkbox (only if AutoQC exists)
-                    rework_qc_confirmed = False
-                    if autoqc:
-                        rework_qc_confirmed = st.checkbox(
-                            "Auto-QC 결과 정확성 확인",
-                            key=f"rework_qc_confirm_{case.id}"
-                        )
-
                     reason = st.text_area(
                         "사유 (필수)",
                         key=f"rework_reason_{case.id}",
@@ -2824,41 +3098,28 @@ def show_review_queue(db: Session, user: dict):
                                     case_id=case.id,
                                     reviewer_user_id=user["id"],
                                     note_text=reason.strip(),
-                                    qc_summary_confirmed=rework_qc_confirmed,
+                                    qc_summary_confirmed=False,
                                     extra_tags_json=tags_json,
                                     created_at=now,
                                 )
                                 db.add(note)
 
-                                # 불일치 기록이 있으면 저장 (놓친 문제 - PASS인데 재작업)
-                                if autoqc and st.session_state.get(f"disagree_check_{case.id}", False):
-                                    disagree_type_val = st.session_state.get(f"disagree_type_{case.id}", "")
-                                    disagree_type_code = "MISSED" if "놓친 문제" in disagree_type_val else "FALSE_ALARM"
-                                    disagree_detail_val = st.session_state.get(f"disagree_detail_{case.id}", "")
-                                    segment_input_val = st.session_state.get(f"disagree_segments_{case.id}", "")
-                                    segments_list = [s.strip() for s in segment_input_val.split(",") if s.strip()] if segment_input_val else []
-                                    segments_json = json.dumps(segments_list, ensure_ascii=False) if segments_list else None
+                                # ReviewerQcFeedback에 코멘트 추가 (불일치 기록은 이미 별도 저장됨)
+                                existing_fb = db.query(ReviewerQcFeedback).filter(
+                                    ReviewerQcFeedback.case_id == case.id,
+                                    ReviewerQcFeedback.reviewer_id == user["id"]
+                                ).first()
 
-                                    existing_fb = db.query(ReviewerQcFeedback).filter(
-                                        ReviewerQcFeedback.case_id == case.id,
-                                        ReviewerQcFeedback.reviewer_id == user["id"]
-                                    ).first()
-
-                                    if existing_fb:
-                                        existing_fb.has_disagreement = True
-                                        existing_fb.disagreement_type = disagree_type_code
-                                        existing_fb.disagreement_detail = disagree_detail_val.strip() or None
-                                        existing_fb.disagreement_segments_json = segments_json
-                                    else:
-                                        new_fb = ReviewerQcFeedback(
-                                            case_id=case.id,
-                                            reviewer_id=user["id"],
-                                            has_disagreement=True,
-                                            disagreement_type=disagree_type_code,
-                                            disagreement_detail=disagree_detail_val.strip() or None,
-                                            disagreement_segments_json=segments_json,
-                                        )
-                                        db.add(new_fb)
+                                if existing_fb:
+                                    existing_fb.review_memo = reason.strip()
+                                else:
+                                    new_fb = ReviewerQcFeedback(
+                                        case_id=case.id,
+                                        reviewer_id=user["id"],
+                                        has_disagreement=False,
+                                        review_memo=reason.strip(),
+                                    )
+                                    db.add(new_fb)
 
                                 # Create REWORK event (REJECT)
                                 event = Event(
@@ -3707,34 +3968,71 @@ def show_work_statistics(db: Session):
     """Show work statistics with sub-tabs."""
     st.subheader("작업 통계")
 
-    sub_tab1, sub_tab2, sub_tab3, sub_tab4 = st.tabs(["성과 요약", "월별 현황", "분포", "가동률"])
+    sub_tab1, sub_tab2, sub_tab3 = st.tabs(["성과", "분포", "가동률"])
 
     with sub_tab1:
-        show_performance_summary(db)
+        show_performance_tab(db)
 
     with sub_tab2:
-        show_monthly_stats(db)
-
-    with sub_tab3:
         show_distribution_stats(db)
 
-    with sub_tab4:
+    with sub_tab3:
         show_utilization_stats(db)
 
 
-def show_performance_summary(db: Session):
-    """성과 요약 - 작업자별 평균 일수, 총 건수."""
+def show_performance_tab(db: Session):
+    """성과 탭 - 요약 카드 + 작업자별 테이블 + 월별 추이."""
+    from calendar import monthrange
+
+    current_year = date.today().year
+    current_month = date.today().month
+
     # 작업자 목록 조회
     workers = db.query(User).filter(User.role == UserRole.WORKER).all()
     worker_names = sorted([w.username for w in workers])
 
-    # 필터
-    with st.expander("필터", expanded=False):
+    # 공휴일 목록 조회
+    calendar = db.query(WorkCalendar).first()
+    if calendar:
+        holidays_list = json.loads(calendar.holidays_json)
+        holidays = [date.fromisoformat(d) for d in holidays_list]
+    else:
+        holidays = []
+
+    # ========== 필터 영역 ==========
+    with st.expander("필터", expanded=True):
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("시작", value=date.today() - timedelta(days=90), key="perf_start")
+            year_options = list(range(2025, current_year + 2))
+            year = st.selectbox("연도", options=year_options, index=year_options.index(current_year) if current_year in year_options else 0, key="perf_year")
         with col2:
-            end_date = st.date_input("종료", value=date.today(), key="perf_end")
+            month_options = ["전체"] + [f"{m}월" for m in range(1, 13)]
+            month_select = st.selectbox("월", options=month_options, index=current_month, key="perf_month_select")
+
+        # 월 선택에 따른 기간 결정
+        if month_select == "전체":
+            # 전체 선택: 기간 입력 활성화
+            col3, col4 = st.columns(2)
+            with col3:
+                default_start = date(year, 1, 1)
+                start_date = st.date_input("시작일", value=default_start, key="perf_start")
+            with col4:
+                default_end = date.today() if year == current_year else date(year, 12, 31)
+                end_date = st.date_input("종료일", value=default_end, key="perf_end")
+        else:
+            # 특정월 선택: 기간 자동 세팅, 비활성화 표시
+            month_num = int(month_select.replace("월", ""))
+            month_start = date(year, month_num, 1)
+            month_end = date(year, month_num, monthrange(year, month_num)[1])
+
+            col3, col4 = st.columns(2)
+            with col3:
+                st.text_input("시작일", value=month_start.strftime("%Y-%m-%d"), disabled=True, key="perf_start_disabled")
+            with col4:
+                st.text_input("종료일", value=month_end.strftime("%Y-%m-%d"), disabled=True, key="perf_end_disabled")
+
+            start_date = month_start
+            end_date = month_end
 
         selected_workers = st.multiselect(
             "작업자",
@@ -3743,147 +4041,216 @@ def show_performance_summary(db: Session):
             key="perf_worker_filter"
         )
 
-    # 완료된 케이스 조회 (ACCEPTED)
+    if start_date > end_date:
+        st.error("시작일이 종료일보다 앞서야 합니다.")
+        return
+
+    # ========== 데이터 조회 ==========
     cases = db.query(Case).filter(
         Case.status == CaseStatus.ACCEPTED,
         Case.accepted_at >= datetime.combine(start_date, datetime.min.time()).replace(tzinfo=TIMEZONE),
         Case.accepted_at <= datetime.combine(end_date, datetime.max.time()).replace(tzinfo=TIMEZONE),
     ).all()
 
-    if not cases:
-        st.info("해당 기간에 완료된 케이스가 없습니다.")
-        return
+    # 근무일 수 계산
+    workdays = count_workdays(start_date, end_date, holidays)
 
-    # 작업자별 집계
-    worker_stats = {}
-    for case in cases:
-        if not case.assigned_user:
-            continue
-        username = case.assigned_user.username
+    # 성과 통계 계산
+    stats = compute_performance_stats(
+        cases=cases,
+        start_date=start_date,
+        end_date=end_date,
+        workdays=workdays,
+        selected_workers=selected_workers if selected_workers else None,
+    )
 
-        # 작업자 필터 적용
-        if selected_workers and username not in selected_workers:
-            continue
+    # ========== 1) 전체 요약 (상단 카드 4개) ==========
+    st.markdown("### 전체 요약")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("총 완료", f"{stats['summary']['total_completed']}건")
+    with col2:
+        st.metric("평균 소요일", f"{stats['summary']['avg_days']}일", help="시작→완료")
+    with col3:
+        st.metric("재작업률", f"{stats['summary']['rework_rate']}%")
+    with col4:
+        st.metric("일일 평균", f"{stats['summary']['daily_avg']}건/일", help="근무일 기준")
 
-        if username not in worker_stats:
-            worker_stats[username] = {"total_days": 0, "count": 0}
+    st.caption(f"기간: {start_date} ~ {end_date} | 근무일: {workdays}일")
 
-        # 작업 일수 계산 (started_at ~ worker_completed_at)
-        if case.started_at and case.worker_completed_at:
-            days = (case.worker_completed_at.date() - case.started_at.date()).days + 1
-            worker_stats[username]["total_days"] += days
-            worker_stats[username]["count"] += 1
+    st.markdown("---")
 
-    if not worker_stats:
+    # ========== 2) 작업자별 성과 테이블 + CSV 버튼 ==========
+    st.markdown("### 작업자별 성과")
+
+    if stats["by_worker"]:
+        # DataFrame 생성
+        worker_data = []
+        for w in stats["by_worker"]:
+            worker_data.append({
+                "작업자": w["worker"],
+                "완료": w["completed"],
+                "재작업": w["rework"],
+                "재작업률(%)": w["rework_rate"],
+                "1차 통과": w["first_pass"],
+                "1차 통과율(%)": w["first_pass_rate"],
+            })
+
+        # 합계 행 추가
+        worker_data.append({
+            "작업자": "합계",
+            "완료": stats["totals"]["completed"],
+            "재작업": stats["totals"]["rework"],
+            "재작업률(%)": stats["totals"]["rework_rate"],
+            "1차 통과": stats["totals"]["first_pass"],
+            "1차 통과율(%)": stats["totals"]["first_pass_rate"],
+        })
+
+        worker_df = pd.DataFrame(worker_data)
+        render_styled_dataframe(worker_df, key="perf_worker_table", enable_selection=False, user_role="admin")
+
+        # CSV 다운로드 버튼
+        csv_worker = worker_df.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            label="작업자별 성과 CSV",
+            data=csv_worker,
+            file_name=f"worker_performance_{start_date}_{end_date}.csv",
+            mime="text/csv",
+            key="csv_worker_perf"
+        )
+    else:
         st.info("해당 조건에 맞는 데이터가 없습니다.")
-        return
 
-    # DataFrame 생성
-    data = []
-    for username in sorted(worker_stats.keys()):
-        stats = worker_stats[username]
-        avg_days = stats["total_days"] / stats["count"] if stats["count"] > 0 else 0
-        daily_avg = 1 / avg_days if avg_days > 0 else 0
-        data.append({
-            "작업자": username,
-            "평균 소요일": f"{avg_days:.2f}",
-            "일일 평균 처리": f"{daily_avg:.2f}",
-            "총 완료 건수": stats["count"],
-        })
+    st.markdown("---")
 
-    # 총계 추가
-    if data:
-        total_days = sum(worker_stats[u]["total_days"] for u in worker_stats)
-        total_count = sum(worker_stats[u]["count"] for u in worker_stats)
-        total_avg = total_days / total_count if total_count > 0 else 0
-        data.append({
-            "작업자": "총계",
-            "평균 소요일": f"{total_avg:.2f}",
-            "일일 평균 처리": f"{1/total_avg:.2f}" if total_avg > 0 else "0",
-            "총 완료 건수": total_count,
-        })
+    # ========== 3) 월별 추이 테이블 + CSV 버튼 + 차트 보기 체크박스 ==========
+    st.markdown("### 월별 추이")
 
-    render_styled_dataframe(pd.DataFrame(data), key="perf_summary", enable_selection=False, user_role="admin")
-
-
-def show_monthly_stats(db: Session):
-    """월별 현황 - 작업자 × 월별 작업 건수."""
-    current_year = date.today().year
-    current_month = date.today().month
-
-    # 작업자 목록 조회
-    workers = db.query(User).filter(User.role == UserRole.WORKER).all()
-    worker_names = sorted([w.username for w in workers])
-
-    # 필터
-    with st.expander("필터", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            year = st.selectbox("연도", options=[2025, current_year], index=1, key="monthly_year")
-        with col2:
-            month_options = list(range(1, 13))
-            month = st.selectbox("월", options=month_options, index=current_month - 1, key="monthly_month", format_func=lambda x: f"{x}월")
-
-        selected_workers = st.multiselect(
-            "작업자",
-            options=worker_names,
-            default=[],
-            key="monthly_worker_filter"
+    if month_select == "전체":
+        # 전체: 12개월 표시
+        monthly_stats = compute_monthly_performance(
+            cases=cases,
+            year=year,
+            start_date=start_date,
+            end_date=end_date,
+            selected_workers=selected_workers if selected_workers else None,
         )
 
-    # 해당 연도/월 완료 케이스 조회
-    start = datetime(year, month, 1, tzinfo=TIMEZONE)
-    # 다음달 1일 - 1초 = 해당월 마지막 날
-    if month == 12:
-        end = datetime(year + 1, 1, 1, tzinfo=TIMEZONE) - timedelta(seconds=1)
+        monthly_data = []
+        for m in monthly_stats:
+            if m["in_range"]:
+                monthly_data.append({
+                    "월": m["month"],
+                    "완료": m["completed"],
+                    "재작업": m["rework"],
+                    "재작업률(%)": m["rework_rate"],
+                    "1차 통과율(%)": m["first_pass_rate"],
+                })
+            else:
+                monthly_data.append({
+                    "월": m["month"],
+                    "완료": "-",
+                    "재작업": "-",
+                    "재작업률(%)": "-",
+                    "1차 통과율(%)": "-",
+                })
+
+        monthly_df = pd.DataFrame(monthly_data)
+        render_styled_dataframe(monthly_df, key="perf_monthly_table", enable_selection=False, user_role="admin")
+
+        # CSV 다운로드 (- 대신 빈칸으로)
+        csv_monthly_data = []
+        for m in monthly_stats:
+            if m["in_range"]:
+                csv_monthly_data.append({
+                    "월": m["month"],
+                    "완료": m["completed"],
+                    "재작업": m["rework"],
+                    "재작업률(%)": m["rework_rate"],
+                    "1차 통과율(%)": m["first_pass_rate"],
+                })
+            else:
+                csv_monthly_data.append({
+                    "월": m["month"],
+                    "완료": "",
+                    "재작업": "",
+                    "재작업률(%)": "",
+                    "1차 통과율(%)": "",
+                })
+
+        csv_monthly_df = pd.DataFrame(csv_monthly_data)
+        csv_monthly = csv_monthly_df.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            label="월별 추이 CSV",
+            data=csv_monthly,
+            file_name=f"monthly_trend_{year}.csv",
+            mime="text/csv",
+            key="csv_monthly_trend"
+        )
+
+        # 차트 보기 체크박스
+        show_chart = st.checkbox("차트 보기", key="perf_show_chart")
+        if show_chart:
+            # 범위 내 월만 차트에 표시
+            chart_data = []
+            for m in monthly_stats:
+                if m["in_range"]:
+                    chart_data.append({
+                        "월": m["month"],
+                        "완료": m["completed"],
+                        "재작업": m["rework"],
+                    })
+
+            if chart_data:
+                chart_df = pd.DataFrame(chart_data)
+                chart_df = chart_df.set_index("월")
+                st.line_chart(chart_df)
+            else:
+                st.info("차트에 표시할 데이터가 없습니다.")
+
     else:
-        end = datetime(year, month + 1, 1, tzinfo=TIMEZONE) - timedelta(seconds=1)
+        # 특정월: 1행만 표시
+        month_num = int(month_select.replace("월", ""))
 
-    cases = db.query(Case).filter(
-        Case.status == CaseStatus.ACCEPTED,
-        Case.accepted_at >= start,
-        Case.accepted_at <= end,
-    ).all()
+        # 해당 월 집계 (이미 조회된 cases에서 필터링)
+        completed = 0
+        rework = 0
+        for case in cases:
+            if not case.assigned_user:
+                continue
+            if selected_workers and case.assigned_user.username not in selected_workers:
+                continue
+            completed += 1
+            if case.revision > 1:
+                rework += 1
 
-    st.markdown(f"**{year}년 {month}월 완료 현황**")
+        first_pass = completed - rework
+        rework_rate = (rework / completed * 100) if completed > 0 else 0
+        first_pass_rate = (first_pass / completed * 100) if completed > 0 else 0
 
-    if not cases:
-        st.info(f"{year}년 {month}월에 완료된 케이스가 없습니다.")
-        return
+        monthly_data = [{
+            "월": f"{year}-{month_num:02d}",
+            "완료": completed,
+            "재작업": rework,
+            "재작업률(%)": round(rework_rate, 1),
+            "1차 통과율(%)": round(first_pass_rate, 1),
+        }]
 
-    # 작업자별 집계
-    worker_counts = {}
-    for case in cases:
-        if not case.assigned_user:
-            continue
-        username = case.assigned_user.username
+        monthly_df = pd.DataFrame(monthly_data)
+        render_styled_dataframe(monthly_df, key="perf_monthly_single", enable_selection=False, user_role="admin")
 
-        # 작업자 필터 적용
-        if selected_workers and username not in selected_workers:
-            continue
+        # CSV 다운로드
+        csv_monthly = monthly_df.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            label="월별 추이 CSV",
+            data=csv_monthly,
+            file_name=f"monthly_trend_{year}_{month_num:02d}.csv",
+            mime="text/csv",
+            key="csv_monthly_single"
+        )
 
-        worker_counts[username] = worker_counts.get(username, 0) + 1
-
-    if not worker_counts:
-        st.info("해당 조건에 맞는 데이터가 없습니다.")
-        return
-
-    # DataFrame 생성
-    data = []
-    for username in sorted(worker_counts.keys()):
-        data.append({
-            "작업자": username,
-            "완료 건수": worker_counts[username],
-        })
-
-    # 총계 행
-    if data:
-        data.append({
-            "작업자": "합계",
-            "완료 건수": sum(worker_counts.values()),
-        })
-
-    render_styled_dataframe(pd.DataFrame(data), key="monthly_stats", enable_selection=False, user_role="admin")
+        # 특정월 선택 시 차트는 숨김
+        st.caption("차트는 월=전체 선택 시에만 표시됩니다.")
 
 
 def show_distribution_stats(db: Session):
@@ -4540,7 +4907,7 @@ def show_qc_data_upload(db: Session):
                     st.error("case_uid 컬럼이 필요합니다.")
                 else:
                     st.markdown(f"**{len(preqc_df)}건 데이터 미리보기:**")
-                    st.dataframe(preqc_df.head(10), use_container_width=True)
+                    render_table_df(preqc_df.head(10), max_rows=10)
 
                     if st.button("Pre-QC 데이터 저장", key="save_preqc"):
                         from models import PreQcSummary
@@ -4677,7 +5044,7 @@ def show_qc_data_upload(db: Session):
                     st.error(f"필수 컬럼이 없습니다: {', '.join(missing_cols)}")
                 else:
                     st.markdown(f"**{len(autoqc_df)}건 데이터 미리보기:**")
-                    st.dataframe(autoqc_df.head(10), use_container_width=True)
+                    render_table_df(autoqc_df.head(10), max_rows=10)
 
                     if st.button("Auto-QC 데이터 저장", key="save_autoqc"):
                         from models import AutoQcSummary
@@ -4767,6 +5134,86 @@ def show_qc_data_upload(db: Session):
                 st.error(f"파일 처리 오류: {e}")
 
 
+def _get_reviewer_disagreement_stats(db: Session, start_date=None, end_date=None):
+    """
+    검수자 기록 기반 불일치 통계를 계산하는 공통 함수.
+    요약 섹션과 상세 섹션에서 동일한 기준으로 사용.
+
+    Returns:
+        dict: {
+            "missed_count": int,
+            "false_alarm_count": int,
+            "total_count": int,
+            "missed_records": list,
+            "false_alarm_records": list,
+            "segment_stats": dict,
+        }
+    """
+    from sqlalchemy import and_
+
+    # 기본 쿼리
+    query = (
+        db.query(ReviewerQcFeedback, Case)
+        .join(Case, ReviewerQcFeedback.case_id == Case.id)
+        .filter(ReviewerQcFeedback.has_disagreement == True)
+    )
+
+    # 날짜 필터 적용
+    if start_date and end_date:
+        start_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=TIMEZONE)
+        end_dt = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=TIMEZONE)
+        query = query.filter(
+            and_(
+                ReviewerQcFeedback.created_at >= start_dt,
+                ReviewerQcFeedback.created_at <= end_dt,
+            )
+        )
+
+    reviewer_feedbacks = query.order_by(ReviewerQcFeedback.created_at.desc()).all()
+
+    # 유형별 분류
+    missed_records = []
+    false_alarm_records = []
+    segment_stats = {}  # 세그먼트별 통계
+
+    for fb, case in reviewer_feedbacks:
+        record = {
+            "case_uid": case.case_uid,
+            "detail": fb.disagreement_detail or "-",
+            "segments": [],
+            "reviewer": fb.reviewer.username if fb.reviewer else "-",
+            "created_at": fb.created_at.strftime("%Y-%m-%d") if fb.created_at else "-",
+        }
+        if fb.disagreement_segments_json:
+            try:
+                record["segments"] = json.loads(fb.disagreement_segments_json)
+            except json.JSONDecodeError:
+                pass
+
+        # 세그먼트별 통계 집계
+        for seg in record["segments"]:
+            if seg not in segment_stats:
+                segment_stats[seg] = {"missed": 0, "false_alarm": 0}
+            if fb.disagreement_type == "MISSED":
+                segment_stats[seg]["missed"] += 1
+            else:
+                segment_stats[seg]["false_alarm"] += 1
+
+        if fb.disagreement_type == "MISSED":
+            missed_records.append(record)
+        else:
+            false_alarm_records.append(record)
+
+    return {
+        "missed_count": len(missed_records),
+        "false_alarm_count": len(false_alarm_records),
+        "total_count": len(missed_records) + len(false_alarm_records),
+        "missed_records": missed_records,
+        "false_alarm_records": false_alarm_records,
+        "segment_stats": segment_stats,
+    }
+
+
 def show_qc_disagreement_analysis(db: Session):
     """Show QC disagreement analysis (ADMIN only)."""
     st.subheader("QC 불일치 분석")
@@ -4794,227 +5241,32 @@ def show_qc_disagreement_analysis(db: Session):
             key="qc_disagree_end"
         )
 
-    # Get all cases with AutoQC summary in date range
-    from sqlalchemy import and_, or_
+    # 공통 집계 함수로 불일치 통계 조회 (요약과 상세가 동일 기준 사용)
+    stats = _get_reviewer_disagreement_stats(db, start_date, end_date)
 
-    # Get cases with AutoQC that have been reviewed (accepted or rework)
-    cases_with_autoqc = (
-        db.query(Case, AutoQcSummary)
-        .join(AutoQcSummary, Case.id == AutoQcSummary.case_id)
-        .filter(
-            Case.status.in_([CaseStatus.ACCEPTED, CaseStatus.REWORK]),
-            or_(
-                and_(Case.accepted_at.isnot(None),
-                     Case.accepted_at >= datetime.combine(start_date, datetime.min.time()).replace(tzinfo=TIMEZONE)),
-                and_(Case.status == CaseStatus.REWORK)
-            )
-        )
-        .all()
-    )
-
-    if not cases_with_autoqc:
-        st.info("선택한 기간에 Auto-QC 데이터가 있는 검수 완료 케이스가 없습니다.")
-        return
-
-    # Calculate disagreements
-    disagreements = []
-    false_positives = 0
-    false_negatives = 0
-    total_with_autoqc = len(cases_with_autoqc)
-
-    # Stats by category
-    stats_by_part = {}
-    stats_by_hospital = {}
-    stats_by_difficulty = {}
-
-    for case, autoqc in cases_with_autoqc:
-        part_name = case.part.name
-        hospital = case.hospital or "Unknown"
-        difficulty = case.difficulty.value
-
-        # Initialize stats
-        for stat_dict, key in [(stats_by_part, part_name), (stats_by_hospital, hospital), (stats_by_difficulty, difficulty)]:
-            if key not in stat_dict:
-                stat_dict[key] = {"total": 0, "disagreements": 0}
-            stat_dict[key]["total"] += 1
-
-        # Check for rework event (to determine if rework was requested after autoqc pass)
-        rework_event = (
-            db.query(Event)
-            .filter(Event.case_id == case.id, Event.event_type == EventType.REWORK_REQUESTED)
-            .order_by(Event.created_at.desc())
-            .first()
-        )
-
-        is_disagreement = False
-        disagreement_type = None
-
-        if autoqc.status == "PASS" and rework_event:
-            # 놓친 문제: AutoQC PASS but rework was requested
-            is_disagreement = True
-            disagreement_type = "MISSED"
-            false_positives += 1
-        elif autoqc.status in ("WARN", "INCOMPLETE") and case.status == CaseStatus.ACCEPTED:
-            # 잘못된 경고: AutoQC WARN/INCOMPLETE but case was accepted
-            is_disagreement = True
-            disagreement_type = "FALSE_ALARM"
-            false_negatives += 1
-
-        if is_disagreement:
-            disagreements.append({
-                "case_id": case.id,
-                "case_uid": case.case_uid,
-                "display_name": case.display_name,
-                "hospital": hospital,
-                "part_name": part_name,
-                "difficulty": difficulty,
-                "autoqc_status": autoqc.status,
-                "case_status": case.status.value,
-                "disagreement_type": disagreement_type,
-                "accepted_at": case.accepted_at,
-                "rework_at": rework_event.created_at if rework_event else None,
-            })
-
-            # Update disagreement stats
-            for stat_dict, key in [(stats_by_part, part_name), (stats_by_hospital, hospital), (stats_by_difficulty, difficulty)]:
-                stat_dict[key]["disagreements"] += 1
-
-    # Summary metrics
+    # Summary metrics (검수자 기록 기반)
     st.markdown("### 요약")
 
-    total_disagreements = len(disagreements)
-    disagreement_rate = (total_disagreements / total_with_autoqc * 100) if total_with_autoqc > 0 else 0
-
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("AutoQC 케이스 수", total_with_autoqc)
+        st.metric("불일치 건수", stats["total_count"])
     with col2:
-        st.metric("불일치 건수", total_disagreements)
+        st.metric("놓친 문제", stats["missed_count"])
     with col3:
-        st.metric("불일치율", f"{disagreement_rate:.1f}%")
-    with col4:
-        miss_alarm_ratio = f"{false_positives}:{false_negatives}"
-        st.metric("놓친 문제 : 잘못된 경고", miss_alarm_ratio)
-
-    st.markdown("---")
-
-    # Disagreement list
-    st.markdown("### 불일치 목록")
-
-    if not disagreements:
-        st.success("선택한 기간에 QC 불일치가 없습니다.")
-    else:
-        # Filters
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            type_filter = st.selectbox(
-                "유형",
-                options=["전체", "놓친 문제", "잘못된 경고"],
-                key="disagree_type_filter"
-            )
-        with col2:
-            part_options = ["전체"] + sorted(set(d["part_name"] for d in disagreements))
-            part_filter = st.selectbox("부위", options=part_options, key="disagree_part_filter")
-        with col3:
-            hosp_options = ["전체"] + sorted(set(d["hospital"] for d in disagreements))
-            hospital_filter = st.selectbox("병원", options=hosp_options, key="disagree_hosp_filter")
-
-        # Apply filters
-        filtered = disagreements
-        if type_filter != "전체":
-            type_code = "MISSED" if type_filter == "놓친 문제" else "FALSE_ALARM"
-            filtered = [d for d in filtered if d["disagreement_type"] == type_code]
-        if part_filter != "전체":
-            filtered = [d for d in filtered if d["part_name"] == part_filter]
-        if hospital_filter != "전체":
-            filtered = [d for d in filtered if d["hospital"] == hospital_filter]
-
-        # Display table
-        display_data = []
-        for d in filtered:
-            status_display = {"PASS": "✅ PASS", "WARN": "⚠️ WARN", "INCOMPLETE": "❌ INCOMPLETE"}.get(d["autoqc_status"], "-")
-            type_display = "놓친 문제" if d["disagreement_type"] == "MISSED" else "잘못된 경고"
-            display_data.append({
-                "케이스 ID": d["case_uid"],
-                "원본 이름": d["display_name"][:30],
-                "부위": d["part_name"],
-                "병원": d["hospital"][:20] if d["hospital"] else "-",
-                "난이도": d["difficulty"],
-                "AutoQC": status_display,
-                "상태": d["case_status"],
-                "유형": type_display,
-            })
-
-        render_styled_dataframe(pd.DataFrame(display_data), key="qc_disagreement_grid", enable_selection=False, height=350, user_role="admin")
-
-        st.caption(f"{len(disagreements)}건 중 {len(filtered)}건 표시")
+        st.metric("잘못된 경고", stats["false_alarm_count"])
 
     # ====== 검수자 기록 불일치 상세 내용 ======
     st.markdown("---")
     st.markdown("### 검수자 기록 불일치 상세")
 
-    st.markdown("""
-    **QC 불일치** = Auto-QC 결과와 검수자 판단이 다른 경우:
-    - **놓친 문제**: Auto-QC가 통과시켰는데 검수자가 문제를 발견해서 재작업 요청
-    - **잘못된 경고**: Auto-QC가 경고했는데 검수자가 확인 후 문제없어서 승인
-    """)
+    # 공통 집계 함수에서 이미 조회한 데이터 재사용
+    missed_records = stats["missed_records"]
+    false_alarm_records = stats["false_alarm_records"]
+    segment_stats = stats["segment_stats"]
 
-    # ReviewerQcFeedback에서 has_disagreement=True인 것 조회
-    reviewer_feedbacks = (
-        db.query(ReviewerQcFeedback, Case)
-        .join(Case, ReviewerQcFeedback.case_id == Case.id)
-        .filter(
-            ReviewerQcFeedback.has_disagreement == True,
-        )
-        .order_by(ReviewerQcFeedback.created_at.desc())
-        .all()
-    )
-
-    if not reviewer_feedbacks:
-        st.info("검수자가 기록한 불일치 내용이 없습니다.")
+    if stats["total_count"] == 0:
+        st.info("선택한 기간에 검수자가 기록한 불일치 내용이 없습니다.")
     else:
-        # 유형별 분류
-        missed_records = []
-        false_alarm_records = []
-        segment_stats = {}  # 세그먼트별 통계
-
-        for fb, case in reviewer_feedbacks:
-            record = {
-                "case_uid": case.case_uid,
-                "detail": fb.disagreement_detail or "-",
-                "segments": [],
-                "reviewer": fb.reviewer.username if fb.reviewer else "-",
-                "created_at": fb.created_at.strftime("%Y-%m-%d") if fb.created_at else "-",
-            }
-            if fb.disagreement_segments_json:
-                try:
-                    record["segments"] = json.loads(fb.disagreement_segments_json)
-                except json.JSONDecodeError:
-                    pass
-
-            # 세그먼트별 통계 집계
-            for seg in record["segments"]:
-                if seg not in segment_stats:
-                    segment_stats[seg] = {"missed": 0, "false_alarm": 0}
-                if fb.disagreement_type == "MISSED":
-                    segment_stats[seg]["missed"] += 1
-                else:
-                    segment_stats[seg]["false_alarm"] += 1
-
-            if fb.disagreement_type == "MISSED":
-                missed_records.append(record)
-            else:
-                false_alarm_records.append(record)
-
-        # ===== 요약 테이블 =====
-        st.markdown("#### 요약")
-        summary_data = [
-            {"유형": "놓친 문제", "건수": len(missed_records)},
-            {"유형": "잘못된 경고", "건수": len(false_alarm_records)},
-            {"유형": "총 불일치", "건수": len(missed_records) + len(false_alarm_records)},
-        ]
-        st.dataframe(pd.DataFrame(summary_data), hide_index=True, height=150)
-
         # ===== 놓친 문제 상세 테이블 =====
         st.markdown("#### 놓친 문제 상세")
         if missed_records:
@@ -5030,7 +5282,8 @@ def show_qc_disagreement_analysis(db: Session):
                     "검수자": r["reviewer"],
                     "날짜": r["created_at"],
                 })
-            st.dataframe(pd.DataFrame(missed_data), hide_index=True, height=min(len(missed_data) * 35 + 60, 300))
+            missed_df = pd.DataFrame(missed_data)
+            render_table_df(missed_df, max_rows=10)
 
             # 상세 내용 expander
             st.markdown("##### 상세 내용 보기")
@@ -5041,7 +5294,9 @@ def show_qc_disagreement_analysis(db: Session):
                     st.markdown(f"**날짜:** {r['created_at']}")
                     st.markdown(f"**세그먼트:** {', '.join(r['segments']) if r['segments'] else '-'}")
                     st.markdown("**상세 내용:**")
-                    st.text_area("", value=r["detail"] if r["detail"] else "-", height=100, disabled=True, key=f"missed_detail_exp_{i}")
+                    detail_text = r["detail"] if r["detail"] else "-"
+                    with st.container(border=True):
+                        st.markdown(detail_text)
         else:
             st.caption("없음")
 
@@ -5060,7 +5315,8 @@ def show_qc_disagreement_analysis(db: Session):
                     "검수자": r["reviewer"],
                     "날짜": r["created_at"],
                 })
-            st.dataframe(pd.DataFrame(false_alarm_data), hide_index=True, height=min(len(false_alarm_data) * 35 + 60, 300))
+            false_alarm_df = pd.DataFrame(false_alarm_data)
+            render_table_df(false_alarm_df, max_rows=10)
 
             # 상세 내용 expander
             st.markdown("##### 상세 내용 보기")
@@ -5071,7 +5327,9 @@ def show_qc_disagreement_analysis(db: Session):
                     st.markdown(f"**날짜:** {r['created_at']}")
                     st.markdown(f"**세그먼트:** {', '.join(r['segments']) if r['segments'] else '-'}")
                     st.markdown("**상세 내용:**")
-                    st.text_area("", value=r["detail"] if r["detail"] else "-", height=100, disabled=True, key=f"false_alarm_detail_exp_{i}")
+                    detail_text = r["detail"] if r["detail"] else "-"
+                    with st.container(border=True):
+                        st.markdown(detail_text)
         else:
             st.caption("없음")
 
@@ -5089,7 +5347,8 @@ def show_qc_disagreement_analysis(db: Session):
                 })
             # 총 건수 기준 내림차순 정렬
             segment_data.sort(key=lambda x: x["총"], reverse=True)
-            st.dataframe(pd.DataFrame(segment_data), hide_index=True, height=min(len(segment_data) * 35 + 60, 300))
+            segment_df = pd.DataFrame(segment_data)
+            render_table_df(segment_df, max_rows=10)
         else:
             st.caption("세그먼트 정보가 없습니다.")
 
