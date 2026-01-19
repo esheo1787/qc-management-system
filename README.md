@@ -127,4 +127,12 @@ AI 자동 검수와 사람 검수의 판단이 다른 경우를 두 가지로 �
 
 ## 8. 스크린샷
 
-(UI 프로토타입 또는 실행 화면 캡처 추가 예정)
+| 운영 개요 | 워크플로우 |
+| :---: | :---: |
+| ![overview](docs/screenshots/01_case_list.png) | ![workflow](docs/screenshots/02_review_workflow.png) |
+| **Fig 1. 전체 케이스 운영 현황** | **Fig 2. AI-Human 협업 검수** |
+
+| QC 모니터링 | 불일치 분석 (핵심) |
+| :---: | :---: |
+| ![monitor](docs/screenshots/03_qc_dashboard.png) | ![insight](docs/screenshots/04_mismatch_analysis.png) |
+| **Fig 3. QC 모니터링 대시보드** | **Fig 4. 불일치 분석 (Mismatch Analysis)** |
