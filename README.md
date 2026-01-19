@@ -1,208 +1,130 @@
 # QC Management System
 
-의료 영상 세그멘테이션 작업 관리 및 품질 관리(QC) 운영 도구
+> **Human-in-the-loop QC 운영 시스템 (Data Operations)**
+> AI 자동 검수와 사람 검증의 협업 구조를 설계하고, 불일치 패턴을 데이터로 축적하여 검수 기준을 개선하는 시스템
 
-## 프로젝트 설명
+- **Role**: 기획, 시스템 설계, 구현 (1인 개발)
+- **Duration**: 2026.01 ~ (진행 중)
+- **Tech Stack**: FastAPI, Streamlit, SQLAlchemy, Pytest
 
-내부 운영용 **작업 관리 / 품질 관리(QC) 운영 도구**입니다.
-- 운영 안정성, 비용 0원, 개인 PC ↔ 회사 PC 이식성을 목표로 설계
-- 원본 의료 데이터(NRRD/DICOM)는 서버로 업로드하지 않음
-- 케이스 메타/상태/이력/시간 로그/QC 요약만 관리
+---
 
-## 주요 기능
+## 1. 프로젝트 배경 및 목적
 
-### 케이스 관리
-- 케이스 등록/조회/수정
-- 작업자 배정 및 재배정
-- 상태 추적 (TODO → IN_PROGRESS → SUBMITTED → ACCEPTED/REWORK)
-- 일괄 등록 (CSV 업로드)
+- **문제 정의**: AI가 생성하거나 처리한 데이터는 자동 검수(Auto-QC)만으로 완벽한 품질 보장이 어려움.
+- **해결 방안**: 사람의 도메인 전문성으로 AI가 놓친 오류를 보완하고, 그 과정에서 발견된 패턴을 다시 자동화에 반영하는 구조(Loop) 설계.
+- **확장성**: 본 프로젝트는 의료 영상 세그멘테이션을 예시로 구현했으나, 핵심 워크플로우는 **텍스트 요약, 분류, 파이프라인 데이터 검증 등 다양한 도메인으로 즉시 확장 가능(Domain Agnostic)**.
 
-### Pre-QC / Auto-QC
-- Pre-QC 요약 저장 (혈관 가시성, 노이즈, 아티팩트 등)
-- Auto-QC 결과 저장 (PASS/WARN/INCOMPLETE)
-- CSV 일괄 업로드 지원
+---
 
-### 작업자 워크플로우
-- 작업 시작/일시중지/재개/제출
-- 순수 작업 시간(work_seconds) 자동 계산
-- QC 피드백 기록 (수정 내역)
-- 추가 수정 사항 기록
+## 2. 시스템 구조 (AI-Human QC 협업 흐름)
 
-### 검수자 워크플로우
-- 제출된 케이스 검수 (승인/재작업 요청)
-- Auto-QC 이슈 확인 체크박스
-- 작업자 추가 수정 확인 체크박스
-- QC 불일치 기록 (놓친 문제/잘못된 경고)
+```
+┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
+│  Pre-QC  │───→│   작업   │───→│ Auto-QC  │───→│  검수자  │
+│  (자동)  │    │  (사람)  │    │  (자동)  │    │  (사람)  │
+└──────────┘    └──────────┘    └──────────┘    └────┬─────┘
+                                                     │
+                                                     ▼
+                                            ┌─────────────────┐
+                                            │ 불일치 분석/개선 │
+                                            └─────────────────┘
+```
 
-### QC 불일치 분석
-- 기간별 불일치 통계
-- 놓친 문제 / 잘못된 경고 상세 목록
-- 세그먼트별 불일치 통계
+| 단계 | 주체 | 설명 |
+|------|------|------|
+| Pre-QC | 자동 | 작업 전 데이터 품질 분석 (난이도, 노이즈 등) |
+| 작업 | 사람 | 실제 작업 수행 |
+| Auto-QC | 자동 | 작업 결과 자동 검증 → PASS / WARN / INCOMPLETE |
+| 검수 | 사람 | Auto-QC 결과 확인 → 승인 / 재작업 요청 |
+| 불일치 분석 | 시스템 | Auto-QC vs 사람 판단 차이 기록 및 분석 |
+| 기준 개선 | 운영 | 불일치 패턴 → QC 기준 및 자동화 로직 개선 |
 
-### 작업 통계
-- **성과 탭**: 작업자별 완료 건수, 평균 작업 시간, 재작업률
-- **분포 탭**: 상태별/난이도별/프로젝트별 분포
-- **가동률 탭**: 팀 가용 시간 대비 실제 작업 시간
+---
 
-### 기타
-- 공휴일/개인 휴가 관리
-- 코호트 태깅 (연구용 케이스 분류)
-- 프로젝트/부위 정의 관리
+## 3. 핵심 개념: 불일치 유형 (Mismatch Type)
 
-## 기술 스택
+AI 자동 검수와 사람 검수의 판단이 다른 경우를 두 가지로 분류하여 관리합니다.
 
-| 구분 | 기술 |
+| 유형 | 영문 | 설명 |
+|------|------|------|
+| 미검출 | False Negative | AI가 정상으로 판정했으나 실제로는 오류인 케이스 (Risk) |
+| 과검출 | False Positive | AI가 오류로 경고했으나 실제로는 정상인 케이스 (Efficiency Loss) |
+
+→ 이 불일치 데이터를 축적하면 "AI가 어디서 틀리는지" 패턴이 보입니다.
+→ 이 패턴은 QC 기준 개선 및 모델 재학습(Re-training)의 핵심 자산이 됩니다.
+
+---
+
+## 4. 주요 기능
+
+**(A) 케이스 관리**
+- 등록 / 배정 / 상태 추적 / 이벤트 로그
+- 상태: TODO → ASSIGNED → IN_PROGRESS → SUBMITTED → IN_REVIEW → COMPLETED / REWORK
+
+**(B) QC 워크플로우**
+- 작업자: QC 이슈 수정 체크 + 추가 수정 사항 기록 (유형: 미검출/과검출)
+- 검수자: 작업자 수정 확인 + 불일치 기록 + 승인/재작업 결정
+
+**(C) QC 불일치 분석 탭**
+- 미검출(False Negative) / 과검출(False Positive) 집계
+- 세그먼트별(또는 항목별) 불일치 통계
+- **운영 지표로서 불일치율(Mismatch Rate)을 추적하여 QC 기준 개선에 활용**
+
+**(D) 작업 통계 대시보드**
+- 성과: 완료 / 재작업 / 1차 통과율
+- 분포: 카테고리별 작업 분포
+- 가동률: 근무일 대비 실제 작업 시간
+
+---
+
+## 5. 기술 스택 및 개발 방식
+
+| 분류 | 기술 |
 |------|------|
-| Backend | FastAPI (sync mode) |
+| Backend | FastAPI, SQLAlchemy, SQLite |
 | Frontend | Streamlit |
-| ORM | SQLAlchemy 2.0 |
-| Database | SQLite (WAL mode) |
-| Validation | Pydantic v2 |
-| Testing | pytest |
-| Timezone | Asia/Seoul |
+| Testing | pytest (77 tests passed) |
+| Arch | Router / Schema / Service / Repository 레이어 분리 |
+| Docs | Swagger (OpenAPI) |
 
-## 설치 방법
+### 🤖 AI-Assisted Development (AI 협업)
 
-### 1. 저장소 클론
-```bash
-git clone <repository-url>
-cd qc-management-system
-```
+본 프로젝트는 **도메인 전문가(Domain Expert)의 기획력**과 **Generative AI의 코딩 능력**을 결합한 사례입니다.
 
-### 2. 가상환경 생성 및 활성화
-```bash
-python -m venv venv
+- **Role**: 핵심 비즈니스 로직 설계, 데이터 모델링, QA 및 디버깅 수행
+- **AI 활용**: LLM(Claude)을 활용한 프롬프트 엔지니어링으로 복잡한 SQL 쿼리 및 Pydantic 스키마 구현 시간을 단축
+- **의의**: 비개발 직군(Operations)도 AI를 활용하면 실무에 필요한 자동화 도구를 직접 구축할 수 있음을 증명
 
-# Windows
-venv\Scripts\activate
+---
 
-# Linux/Mac
-source venv/bin/activate
-```
+## 6. 설계 원칙 및 구현 특징
 
-### 3. 의존성 설치
-```bash
-pip install -r requirements.txt
-```
+- **API 계약 기반 개발**: 기능 변경 없이 안전한 리팩토링 가능
+- **단일 집계 함수 (SSOT)**: 요약/상세가 동일한 기준으로 계산 (데이터 불일치 방지)
+- **테스트 안정성**: 트랜잭션 격리로 77개 테스트 100% 통과 유지
+- **저장 후 재조회 패턴**: UI 상태 불일치 방지
 
-### 4. 데이터베이스 초기화
-```bash
-python seed.py
-```
+---
 
-## 실행 방법
+## 7. 설계 인사이트 (Design Insights)
 
-### API 서버 (FastAPI)
-```bash
-uvicorn main:app --reload
-```
-- URL: http://127.0.0.1:8000
-- API 문서: http://127.0.0.1:8000/docs
+이 프로젝트를 통해 얻은 Research Operations 관점의 인사이트입니다.
 
-### 대시보드 (Streamlit)
-```bash
-streamlit run dashboard.py
-```
-- URL: http://localhost:8501
+### 1. Disagreement Point가 핵심 자산
+- AI와 사람의 판단이 갈라지는 지점(불일치)을 "비용"이 아니라 **"자산"**으로 봐야 합니다.
+- 이 데이터가 모델 성능 향상의 핵심 키(Key)가 됩니다.
 
-> **참고**: API 서버와 대시보드를 모두 실행해야 정상 동작합니다.
+### 2. QC는 단순 검수가 아니라 운영 시스템
+- 검수 기준 정의 → 자동화 → 예외 케이스 수집 → 기준 개선
+- 이 사이클(Loop)이 돌아야 품질이 지속적으로 개선됩니다.
 
-### Windows 배치 파일 사용
-```
-run_server.bat     # API 서버 실행
-run_dashboard.bat  # 대시보드 실행
-```
+### 3. 운영 지표의 중요성
+- 불일치율(Mismatch Rate), 1차 통과율, 재작업률 등을 추적해야
+- "느낌"이 아닌 **"데이터"**로 품질을 관리할 수 있습니다.
 
-## 테스트 실행
+---
 
-```bash
-# 전체 테스트
-python -m pytest tests/ -v
+## 8. 스크린샷
 
-# 간단한 결과만
-python -m pytest tests/ -q
-
-# 특정 파일 테스트
-python -m pytest tests/test_cases.py -v
-```
-
-현재 테스트 현황: **77 tests passed**
-
-## 폴더 구조
-
-```
-qc-management-system/
-├── main.py              # FastAPI 애플리케이션 진입점
-├── models.py            # SQLAlchemy 모델 정의
-├── schemas.py           # Pydantic 스키마
-├── services.py          # 비즈니스 로직
-├── routes.py            # API 라우터 등록
-├── database.py          # 데이터베이스 연결 설정
-├── config.py            # 설정 (타임존 등)
-├── metrics.py           # 지표 계산 함수
-├── dashboard.py         # Streamlit 대시보드
-├── seed.py              # 초기 데이터 생성
-├── seed_demo.py         # 데모 데이터 생성 (50건)
-├── requirements.txt     # Python 의존성
-├── pytest.ini           # pytest 설정
-│
-├── api/                 # API 엔드포인트 모듈
-│   ├── auth.py          # 인증
-│   ├── cases.py         # 케이스 관리
-│   ├── events.py        # 이벤트/워크로그
-│   ├── definitions.py   # 프로젝트/부위 정의
-│   ├── qc_summary.py    # Pre-QC/Auto-QC
-│   ├── qc_disagreements.py  # QC 불일치
-│   ├── timeoff.py       # 휴무 관리
-│   └── ...
-│
-├── tests/               # 테스트 코드
-│   ├── conftest.py      # pytest 설정/픽스처
-│   ├── test_auth.py
-│   ├── test_cases.py
-│   ├── test_events.py
-│   ├── test_qc.py
-│   └── ...
-│
-├── docs/                # 문서
-│   ├── API_CONTRACT.md  # API 명세
-│   └── VERIFICATION.md  # 검증 체크리스트
-│
-├── data/
-│   └── app.db           # SQLite 데이터베이스
-│
-└── .claude/             # Claude 설정 (gitignore)
-```
-
-## 사용자 역할
-
-| 역할 | 권한 |
-|------|------|
-| **Admin** | 전체 시스템 관리, 케이스 할당, 검수, 설정 변경 |
-| **Worker** | 할당된 케이스 작업, 시간 기록, 제출 |
-
-## 데모 데이터 생성
-
-테스트용 50건의 케이스를 생성하려면:
-```bash
-python seed_demo.py
-```
-
-생성되는 데이터:
-- 사용자 6명 (admin 2, worker 4)
-- 케이스 50건 (다양한 상태 분포)
-- Pre-QC / Auto-QC 데이터
-- 작업자/검수자 피드백
-
-## 설계 원칙
-
-1. **상태 변경**: Event를 통해서만 Case.status 변경
-2. **시간 기록**: WorkLog로만 작업 시간 기록
-3. **지표 계산**: 실시간 계산 (DB 저장 안함)
-4. **권한 검증**: 서버에서 강제
-5. **동시성**: revision 기반 낙관적 락
-6. **멱등성**: idempotency_key로 중복 요청 방지
-
-## 라이선스
-
-Internal Use Only - 내부 운영 전용
+(UI 프로토타입 또는 실행 화면 캡처 추가 예정)
