@@ -1,133 +1,198 @@
 # QC Management System
 
-의료 영상 작업 관리 및 품질 관리(QC) 운영 도구
+의료 영상 세그멘테이션 작업 관리 및 품질 관리(QC) 운영 도구
 
-## 시스템 요구사항
+## 프로젝트 설명
 
-- Python 3.9 이상
-- Windows 10/11 (개발 및 운영 환경)
-
-## 빠른 시작 (Windows)
-
-### 1. 초기 설정 (최초 1회)
-
-`setup.bat`을 더블클릭하여 실행합니다.
-
-이 스크립트는 다음을 자동으로 수행합니다:
-- 가상환경(venv) 생성
-- 의존성 패키지 설치
-- 데이터베이스 초기화 및 시드 데이터 생성
-
-**중요**: 설정 완료 후 표시되는 API 키를 반드시 저장하세요!
-
-### 2. 서버 실행
-
-#### API 서버 (FastAPI)
-```
-run_server.bat 더블클릭
-```
-- URL: http://127.0.0.1:8000
-- API 문서: http://127.0.0.1:8000/docs
-
-#### 대시보드 (Streamlit)
-```
-run_dashboard.bat 더블클릭
-```
-- URL: http://localhost:8501
-
-**참고**: API 서버와 대시보드를 모두 실행해야 정상 동작합니다.
-
-## 수동 설치 (선택사항)
-
-### 1. 가상환경 생성 및 활성화
-
-```bash
-python -m venv venv
-venv\Scripts\activate
-```
-
-### 2. 의존성 설치
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. 데이터베이스 초기화
-
-```bash
-python seed.py
-```
-
-### 4. 서버 실행
-
-API 서버:
-```bash
-python -m uvicorn main:app --reload
-```
-
-대시보드:
-```bash
-python -m streamlit run dashboard.py
-```
-
-## 프로젝트 구조
-
-```
-qc-management-system/
-├── main.py              # FastAPI 애플리케이션
-├── models.py            # SQLAlchemy 모델 정의
-├── schemas.py           # Pydantic 스키마
-├── database.py          # 데이터베이스 연결 설정
-├── metrics.py           # 지표 계산 함수
-├── dashboard.py         # Streamlit 대시보드
-├── seed.py              # 초기 데이터 생성
-├── requirements.txt     # Python 의존성
-├── setup.bat            # 초기 설정 스크립트
-├── run_server.bat       # API 서버 실행 스크립트
-├── run_dashboard.bat    # 대시보드 실행 스크립트
-└── data/
-    └── app.db           # SQLite 데이터베이스
-```
-
-## 사용자 역할
-
-- **Admin**: 전체 시스템 관리, 케이스 할당, 검수, 설정 변경
-- **Worker**: 할당된 케이스 작업, 시간 기록, 제출
+내부 운영용 **작업 관리 / 품질 관리(QC) 운영 도구**입니다.
+- 운영 안정성, 비용 0원, 개인 PC ↔ 회사 PC 이식성을 목표로 설계
+- 원본 의료 데이터(NRRD/DICOM)는 서버로 업로드하지 않음
+- 케이스 메타/상태/이력/시간 로그/QC 요약만 관리
 
 ## 주요 기능
 
 ### 케이스 관리
-- 케이스 등록/조회
-- 작업자 할당
+- 케이스 등록/조회/수정
+- 작업자 배정 및 재배정
 - 상태 추적 (TODO → IN_PROGRESS → SUBMITTED → ACCEPTED/REWORK)
+- 일괄 등록 (CSV 업로드)
 
-### 작업 시간 추적
-- START/PAUSE/RESUME/SUBMIT 워크로그
-- 순수 작업 시간(work_seconds) 계산
-- Man-Days(MD) 환산
+### Pre-QC / Auto-QC
+- Pre-QC 요약 저장 (혈관 가시성, 노이즈, 아티팩트 등)
+- Auto-QC 결과 저장 (PASS/WARN/INCOMPLETE)
+- CSV 일괄 업로드 지원
 
-### 품질 관리
-- Pre-QC / Auto-QC 요약 저장
-- QC 불일치 분석
-- 작업자 QC 피드백
+### 작업자 워크플로우
+- 작업 시작/일시중지/재개/제출
+- 순수 작업 시간(work_seconds) 자동 계산
+- QC 피드백 기록 (수정 내역)
+- 추가 수정 사항 기록
 
-### 휴무/캘린더
-- 공휴일 관리
-- 개인 휴가 관리
-- 팀 가용시간 계산
+### 검수자 워크플로우
+- 제출된 케이스 검수 (승인/재작업 요청)
+- Auto-QC 이슈 확인 체크박스
+- 작업자 추가 수정 확인 체크박스
+- QC 불일치 기록 (놓친 문제/잘못된 경고)
 
-### 코호트 태깅
-- 케이스 태그 관리
-- 정의 스냅샷 버전 관리
-- 프로젝트-정의 연결
+### QC 불일치 분석
+- 기간별 불일치 통계
+- 놓친 문제 / 잘못된 경고 상세 목록
+- 세그먼트별 불일치 통계
+
+### 작업 통계
+- **성과 탭**: 작업자별 완료 건수, 평균 작업 시간, 재작업률
+- **분포 탭**: 상태별/난이도별/프로젝트별 분포
+- **가동률 탭**: 팀 가용 시간 대비 실제 작업 시간
+
+### 기타
+- 공휴일/개인 휴가 관리
+- 코호트 태깅 (연구용 케이스 분류)
+- 프로젝트/부위 정의 관리
 
 ## 기술 스택
 
-- **Backend**: FastAPI (sync mode)
-- **Database**: SQLAlchemy 2.0 + SQLite (WAL mode)
-- **Validation**: Pydantic v2
-- **Dashboard**: Streamlit
-- **Timezone**: Asia/Seoul
+| 구분 | 기술 |
+|------|------|
+| Backend | FastAPI (sync mode) |
+| Frontend | Streamlit |
+| ORM | SQLAlchemy 2.0 |
+| Database | SQLite (WAL mode) |
+| Validation | Pydantic v2 |
+| Testing | pytest |
+| Timezone | Asia/Seoul |
+
+## 설치 방법
+
+### 1. 저장소 클론
+```bash
+git clone <repository-url>
+cd qc-management-system
+```
+
+### 2. 가상환경 생성 및 활성화
+```bash
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# Linux/Mac
+source venv/bin/activate
+```
+
+### 3. 의존성 설치
+```bash
+pip install -r requirements.txt
+```
+
+### 4. 데이터베이스 초기화
+```bash
+python seed.py
+```
+
+## 실행 방법
+
+### API 서버 (FastAPI)
+```bash
+uvicorn main:app --reload
+```
+- URL: http://127.0.0.1:8000
+- API 문서: http://127.0.0.1:8000/docs
+
+### 대시보드 (Streamlit)
+```bash
+streamlit run dashboard.py
+```
+- URL: http://localhost:8501
+
+> **참고**: API 서버와 대시보드를 모두 실행해야 정상 동작합니다.
+
+### Windows 배치 파일 사용
+```
+run_server.bat     # API 서버 실행
+run_dashboard.bat  # 대시보드 실행
+```
+
+## 테스트 실행
+
+```bash
+# 전체 테스트
+python -m pytest tests/ -v
+
+# 간단한 결과만
+python -m pytest tests/ -q
+
+# 특정 파일 테스트
+python -m pytest tests/test_cases.py -v
+```
+
+현재 테스트 현황: **77 tests passed**
+
+## 폴더 구조
+
+```
+qc-management-system/
+├── main.py              # FastAPI 애플리케이션 진입점
+├── models.py            # SQLAlchemy 모델 정의
+├── schemas.py           # Pydantic 스키마
+├── services.py          # 비즈니스 로직
+├── routes.py            # API 라우터 등록
+├── database.py          # 데이터베이스 연결 설정
+├── config.py            # 설정 (타임존 등)
+├── metrics.py           # 지표 계산 함수
+├── dashboard.py         # Streamlit 대시보드
+├── seed.py              # 초기 데이터 생성
+├── seed_demo.py         # 데모 데이터 생성 (50건)
+├── requirements.txt     # Python 의존성
+├── pytest.ini           # pytest 설정
+│
+├── api/                 # API 엔드포인트 모듈
+│   ├── auth.py          # 인증
+│   ├── cases.py         # 케이스 관리
+│   ├── events.py        # 이벤트/워크로그
+│   ├── definitions.py   # 프로젝트/부위 정의
+│   ├── qc_summary.py    # Pre-QC/Auto-QC
+│   ├── qc_disagreements.py  # QC 불일치
+│   ├── timeoff.py       # 휴무 관리
+│   └── ...
+│
+├── tests/               # 테스트 코드
+│   ├── conftest.py      # pytest 설정/픽스처
+│   ├── test_auth.py
+│   ├── test_cases.py
+│   ├── test_events.py
+│   ├── test_qc.py
+│   └── ...
+│
+├── docs/                # 문서
+│   ├── API_CONTRACT.md  # API 명세
+│   └── VERIFICATION.md  # 검증 체크리스트
+│
+├── data/
+│   └── app.db           # SQLite 데이터베이스
+│
+└── .claude/             # Claude 설정 (gitignore)
+```
+
+## 사용자 역할
+
+| 역할 | 권한 |
+|------|------|
+| **Admin** | 전체 시스템 관리, 케이스 할당, 검수, 설정 변경 |
+| **Worker** | 할당된 케이스 작업, 시간 기록, 제출 |
+
+## 데모 데이터 생성
+
+테스트용 50건의 케이스를 생성하려면:
+```bash
+python seed_demo.py
+```
+
+생성되는 데이터:
+- 사용자 6명 (admin 2, worker 4)
+- 케이스 50건 (다양한 상태 분포)
+- Pre-QC / Auto-QC 데이터
+- 작업자/검수자 피드백
 
 ## 설계 원칙
 
@@ -136,16 +201,7 @@ qc-management-system/
 3. **지표 계산**: 실시간 계산 (DB 저장 안함)
 4. **권한 검증**: 서버에서 강제
 5. **동시성**: revision 기반 낙관적 락
-
-## 환경 설정
-
-환경별 설정은 `.env` 파일로 관리할 수 있습니다 (선택사항).
-
-```env
-# 예시
-DATABASE_URL=sqlite:///./data/app.db
-TIMEZONE=Asia/Seoul
-```
+6. **멱등성**: idempotency_key로 중복 요청 방지
 
 ## 라이선스
 
