@@ -19,16 +19,20 @@
 
 ## 2. 시스템 구조 (AI-Human QC 협업 흐름)
 
-```
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│  Pre-QC  │───→│   작업   │───→│ Auto-QC  │───→│  검수자  │
-│  (자동)  │    │  (사람)  │    │  (자동)  │    │  (사람)  │
-└──────────┘    └──────────┘    └──────────┘    └────┬─────┘
-                                                     │
-                                                     ▼
-                                            ┌─────────────────┐
-                                            │ 불일치 분석/개선 │
-                                            └─────────────────┘
+```mermaid
+flowchart LR
+    %% 노드 정의
+    A[Pre-QC<br/>자동] --> B[작업<br/>사람]
+    B --> C[Auto-QC<br/>자동]
+    C --> D[검수자<br/>사람]
+    D -.-> E[불일치 분석/개선]
+
+    %% 스타일링 (AI는 파란색, 사람은 주황색, 결과는 빨간색)
+    style A fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000
+    style C fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000
+    style B fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
+    style D fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
+    style E fill:#ffebee,stroke:#c62828,stroke-width:2px,stroke-dasharray: 5 5,color:#000
 ```
 
 | 단계 | 주체 | 설명 |
