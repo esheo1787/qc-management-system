@@ -1,7 +1,7 @@
 """
 Auth API Router.
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends 
 
 from models import User
 from schemas import AuthMeResponse
