@@ -175,3 +175,110 @@
 모든 Step(1~5)은 이 규칙에 종속된다.
 
 ---
+
+# ⚠️ Step 0 예외 사항 (2025-02 업그레이드용)
+
+## 네트워크 I/O 예외 허용
+
+기존 규칙: `requests, httpx, urllib, socket 사용 금지`
+
+아래 두 가지는 **예외로 허용**한다. 비용 0원이며 Step 0 취지(유료 클라우드 API 방지)에 위배되지 않음.
+
+| 허용 대상 | 용도 | 근거 |
+|-----------|------|------|
+| `requests` → `localhost:5050` | Auto-QC 트리거 (같은 PC 내부 통신) | 인터넷 미사용, 비용 0원 |
+| `requests` → `chat.googleapis.com` | Google Chat webhook 알림 | 무료 API, 비용 0원 |
+
+**여전히 금지:**
+- OpenAI, Anthropic, Azure, AWS 등 유료 API 호출
+- 클라우드 GPU/서버 호출
+- 그 외 모든 외부 SaaS API
+
+---
+
+# 🔀 작업 브랜치 규칙
+
+- **현재 브랜치: `feature/autoqc-routing`**
+- `main` checkout 절대 금지. 이 브랜치에서만 작업.
+- 커밋 메시지 형식: `feat: Phase X - 설명` 또는 `fix: Phase X - 설명`
+
+---
+
+# 📋 업그레이드 구현 지침
+
+**참조 문서: `UPGRADE_GUIDE.md` (프로젝트 루트)**
+
+전체 구현은 Phase 1~5로 나뉜다. **반드시 순서대로, 한 Phase씩 실행**한다.
+
+## 실행 규칙
+
+1. **Phase 순서 엄수**: Phase 1 → 2 → 3 → 4 → 5. 건너뛰기 금지.
+2. **Phase 내 단계 순서 엄수**: 1-1 → 1-2 → 1-3 → ... 순서대로.
+3. **매 Phase 완료 후 검증**:
+   ```bash
+   python -m py_compile <수정한 파일>   # 구문 오류 확인
+   pytest tests/ --tb=short -q          # 회귀 테스트
+   ```
+4. **테스트 실패 시 다음 Phase 진행 금지**. 원인 파악 → 수정 → 재실행 → 통과 후 진행.
+5. **Phase 완료 후 커밋**:
+   ```bash
+   git add -A
+   git commit -m "feat: Phase X - 설명"
+   ```
+
+## Phase 요약
+
+### Phase 1: 모델 변경
+- CaseStatus에 `IN_REVIEW` 추가
+- EventType에 `AUTOQC_PASS`, `AUTOQC_FAIL` 추가
+- Case.autoqc_triggered_at 필드 추가
+- NotificationLog 모델 추가
+- 마이그레이션 스크립트 (migrate_v2.py)
+- ⚠️ SQLite Enum은 문자열 저장이므로 enum 추가는 코드 변경만으로 충분
+
+### Phase 2: 상태 전이 로직
+- VALID_TRANSITIONS 수정 (SUBMITTED→ACCEPTED/REWORK 삭제, IN_REVIEW 경유로 변경)
+- save_autoqc_summary()에 자동 라우팅 추가 (PASS→IN_REVIEW, WARN/INCOMPLETE→REWORK)
+- dashboard.py 검수자 필터: SUBMITTED → IN_REVIEW
+- get_worker_tasks()에 SUBMITTED 포함
+- 기존 테스트 수정 (SUBMITTED→ACCEPTED 직접 전이 테스트 → Auto-QC 경유로 변경)
+- ⚠️ 이 Phase에서 기존 테스트가 깨지는 것은 정상. 테스트를 새 로직에 맞게 수정.
+
+### Phase 3: 로컬 Flask Auto-QC 트리거
+- `autoqc-trigger/` 별도 프로젝트 폴더 생성 (웹 코드베이스와 분리)
+- submit_case()에 _trigger_autoqc() 추가 (fire-and-forget, 실패해도 제출 성공)
+- config.py에 AUTOQC_TRIGGER_URL 추가
+- ⚠️ Flask 서버 없이도 웹 서버 정상 동작해야 함 (URL 비어있으면 스킵)
+
+### Phase 4: Google Chat 알림
+- notification.py 신규 생성
+- AUTOQC_PASS → 검수자 채팅방, AUTOQC_FAIL → 작업자 채팅방
+- REWORK_REQUESTED, ACCEPTED → 작업자 채팅방
+- NotificationLog에 발송 기록 저장
+- config.py에 GCHAT_WEBHOOK_REVIEWER, GCHAT_WEBHOOK_WORKER, NOTIFICATIONS_ENABLED 추가
+- ⚠️ NOTIFICATIONS_ENABLED=false일 때 HTTP 호출 안 함 (테스트 환경 안전)
+
+### Phase 5: False Positive 처리 (검수자 최종 확인)
+- Auto-QC 검사 기준 자체는 불변. 작업자 피드백으로 QC 기준이 바뀌지 않음.
+- autoqc-trigger에 determine_final_status() 구현 (라우팅 판정만 조정)
+- /api/cases/{id}/worker-false-alarms 엔드포인트 추가
+- dashboard.py 검수자 IN_REVIEW 상세에 작업자 피드백 표시
+- 검수자가 최종 판단 (동의→ACCEPTED, 거부→REWORK)
+
+## 건드리면 안 되는 것
+
+- Step 0의 모든 불변 조건 (Event 기반 상태 변경, WorkLog 시간 기록 등)
+- 기존 API 엔드포인트의 요청/응답 스키마 (하위 호환 유지)
+- Pre-QC 관련 로직 (이번 업그레이드 범위 밖)
+- seed.py, seed_demo.py (테스트 데이터 생성기)
+- tests/ 폴더의 conftest.py 구조 (fixture 패턴 유지, 내용만 수정)
+
+## 코드 변경 시 필수 검증
+
+```text
+[ ] 수정한 .py 파일: python -m py_compile <파일>
+[ ] import 변경 시: python -c "from <모듈> import <대상>"
+[ ] 로직 변경 시: pytest tests/ --tb=short -q
+[ ] 테스트 실패 → 원인 파악 → 수정 → 재실행. 통과 전 다음 작업 금지.
+[ ] Step 0 Self-Check 항목 재확인
+```
