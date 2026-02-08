@@ -662,39 +662,144 @@ elif request.event_type == EventType.ACCEPTED:
 
 ---
 
-### Phase 5: Worker False Positive 처리
+### Phase 5: Worker False Positive 처리 (검수자 최종 확인)
 
-작업자가 Auto-QC WARN 항목 중 "잘못된 경고"를 표시하면, 재제출 시 Auto-QC가 해당 항목을 예외 처리해야 한다.
+작업자가 Auto-QC WARN 항목 중 "잘못된 경고"를 표시할 수 있다.
+단, **Auto-QC는 예외 처리 없이 항상 동일 기준으로 검사**한다.
+작업자의 피드백은 **검수자에게 전달되는 맥락 정보**로만 기능한다.
 
-#### 5-1. 기존 워크플로우와의 연동
+#### 핵심 원칙
 
-현재 `WorkerQcFeedback`에 `qc_result_error` 필드와 `additional_fixes_json`이 이미 있다. 이를 활용:
+```
+Auto-QC = 기계적 검사. 작업자 피드백으로 기준이 바뀌지 않음.
+검수자 = 최종 판단권. "잘못된 경고" 주장의 타당성을 검수자가 결정.
+```
 
-1. 작업자가 WARN 항목에 대해 "잘못된 경고" 피드백 제출 (`qc_result_error=True` 또는 `additional_fixes_json`에 `{"type": "FALSE_ALARM", ...}`)
-2. Auto-QC 재실행 시, 웹 서버에서 해당 케이스의 피드백을 조회
-3. "잘못된 경고"로 표시된 항목은 예외 처리
+#### 흐름
 
-#### 5-2. API 엔드포인트 추가
+```
+작업자: WARN 항목에 "잘못된 경고" 피드백 제출
+    │
+    ▼
+작업자: 실제 이슈만 수정 후 재제출
+    │
+    ▼
+Auto-QC 재실행 (동일 기준, 예외 없음)
+    │
+    ├─ 남은 WARN이 "잘못된 경고" 표시 항목뿐 → PASS → IN_REVIEW
+    │       검수자가 케이스 열면:
+    │         - Auto-QC 결과 (WARN 항목 목록)
+    │         - 작업자 피드백 ("이 항목은 잘못된 경고")
+    │         → 검수자가 동의하면 ACCEPTED
+    │         → 검수자가 거부하면 REWORK + 사유 기재
+    │
+    └─ 실제 이슈 남아있음 → WARN → REWORK (작업자에게 반환)
+```
+
+#### 5-1. Auto-QC에서 "잘못된 경고" 항목 처리
+
+**중요: Auto-QC 로직 자체는 변경하지 않는다.**
+
+대신 로컬 Flask 서버(autoqc-trigger)에서 결과 판정 시, 작업자가 "잘못된 경고"로 표시한 항목만 남은 경우 최종 status를 `PASS`로 올려보낸다.
+
+```python
+# autoqc-trigger/autoqc_runner.py
+
+def determine_final_status(raw_issues: list, worker_false_alarms: list) -> str:
+    """
+    Auto-QC 원본 결과에서, 작업자가 FALSE_ALARM으로 표시한 항목을 제외하고
+    남은 이슈가 있는지 판단.
+
+    - raw_issues: Auto-QC가 검출한 전체 이슈 (기준 불변)
+    - worker_false_alarms: 작업자가 "잘못된 경고"로 표시한 항목
+    - 반환: "PASS" / "WARN" / "INCOMPLETE"
+
+    ⚠️ Auto-QC 검사 기준 자체는 바꾸지 않는다.
+       전체 이슈 목록은 그대로 웹에 업로드한다 (검수자가 볼 수 있도록).
+       이 함수는 "라우팅 판정"만 조정한다.
+    """
+    # INCOMPLETE 이슈는 절대 예외 처리 불가
+    incomplete_issues = [i for i in raw_issues if i.get("level") == "INCOMPLETE"]
+    if incomplete_issues:
+        return "INCOMPLETE"
+
+    # WARN 이슈 중 작업자 FALSE_ALARM 표시 제외
+    warn_issues = [i for i in raw_issues if i.get("level") == "WARN"]
+    false_alarm_keys = {(fa["segment"], fa["code"]) for fa in worker_false_alarms}
+
+    remaining_warns = [
+        i for i in warn_issues
+        if (i.get("segment"), i.get("code")) not in false_alarm_keys
+    ]
+
+    if remaining_warns:
+        return "WARN"
+
+    return "PASS"  # WARN이 전부 FALSE_ALARM으로 상쇄됨
+```
+
+#### 5-2. 작업자 FALSE_ALARM 피드백 조회 API
 
 **파일**: `api/` (해당 라우터)
 
+로컬 Flask 서버가 Auto-QC 재실행 전에 호출하여 작업자 피드백을 가져간다.
+
 ```python
-@router.get("/api/cases/{case_id}/worker-exceptions")
-def get_worker_exceptions(case_id: int, ...):
+@router.get("/api/cases/{case_id}/worker-false-alarms")
+def get_worker_false_alarms(case_id: int, ...):
     """
-    로컬 Auto-QC 클라이언트가 재실행 전에 호출.
-    작업자가 "잘못된 경고"로 표시한 항목 목록 반환.
+    작업자가 "잘못된 경고"로 표시한 항목 목록.
+    Auto-QC 클라이언트가 라우팅 판정 시 참조 (QC 기준 변경 아님).
     """
     feedbacks = get_case_feedbacks(db, case_id)
-    exceptions = []
+    false_alarms = []
     for fb in feedbacks:
         if fb.additional_fixes_json:
             fixes = json.loads(fb.additional_fixes_json)
             for fix in fixes:
                 if fix.get("type") == "FALSE_ALARM":
-                    exceptions.append(fix)
-    return {"case_id": case_id, "exceptions": exceptions}
+                    false_alarms.append({
+                        "segment": fix.get("segment"),
+                        "code": fix.get("code"),
+                        "worker_reason": fix.get("description", ""),
+                    })
+    return {"case_id": case_id, "false_alarms": false_alarms}
 ```
+
+#### 5-3. 검수자 UI에 작업자 피드백 표시
+
+**파일**: `dashboard.py` (검수자 페이지)
+
+IN_REVIEW 케이스 상세 화면에서 Auto-QC 결과와 함께 작업자 피드백을 나란히 표시한다.
+
+```
+┌─────────────────────────────────────┐
+│ Auto-QC 결과                         │
+│  ⚠️ WARN: IVC 세그먼트 이름 불일치    │
+│                                     │
+│ 작업자 피드백                         │
+│  🏷️ "잘못된 경고" — IVC: 이름 규칙   │
+│     사유: "프로젝트 정의서 v2에서      │
+│           IVC_trunk로 변경됨"         │
+│                                     │
+│ [✅ 동의 (ACCEPTED)]  [↩️ 거부 (REWORK)] │
+└─────────────────────────────────────┘
+```
+
+검수자가 "동의"하면 ACCEPTED, "거부"하면 REWORK + 사유를 기재한다.
+검수자의 판단은 `ReviewerQcFeedback`에 기록되어 불일치 분석에 반영된다.
+
+#### 5-4. 불일치 분석 연동
+
+기존 `ReviewerQcFeedback`의 `disagreement_type` 필드를 활용:
+
+| 상황 | disagreement_type | 의미 |
+|------|------------------|------|
+| Auto-QC WARN → 작업자 "잘못된 경고" → 검수자 동의 | `FALSE_ALARM` | Auto-QC 기준이 과민함 |
+| Auto-QC WARN → 작업자 "잘못된 경고" → 검수자 거부 | `MISSED` | 작업자가 실제 이슈를 무시함 |
+| Auto-QC PASS → 검수자가 문제 발견 | `MISSED` | Auto-QC가 놓침 |
+
+이 데이터가 축적되면 Auto-QC 기준 자체를 조정할 근거가 된다.
 
 ---
 
@@ -731,9 +836,12 @@ Phase 4: Google Chat 알림
   □ 4-4. services.py에 알림 호출 연결
   □ pytest 실행 → 통과 (NOTIFICATIONS_ENABLED=false)
 
-Phase 5: False Positive 처리
-  □ 5-1. /api/cases/{id}/worker-exceptions 엔드포인트 추가
-  □ 5-2. autoqc-trigger에서 예외 목록 조회 후 QC 실행
+Phase 5: False Positive 처리 (검수자 최종 확인)
+  □ 5-1. autoqc-trigger에 determine_final_status() 구현 (QC 기준 불변, 라우팅만 조정)
+  □ 5-2. /api/cases/{id}/worker-false-alarms 엔드포인트 추가
+  □ 5-3. dashboard.py 검수자 IN_REVIEW 상세 화면에 작업자 피드백 표시
+  □ 5-4. ReviewerQcFeedback에 FALSE_ALARM disagreement_type 연동
+  □ pytest 실행 → 통과
 ```
 
 ---
@@ -763,7 +871,9 @@ Phase 5: False Positive 처리
 | `migrate_v2.py` | 신규 | 1 |
 | `tests/` | 수정 (상태 전이 테스트 업데이트) | 2 |
 | `autoqc-trigger/` | 신규 (별도 프로젝트) | 3 |
-| `api/` 내 라우터 | 수정 (worker-exceptions 엔드포인트) | 5 |
+| `api/` 내 라우터 | 수정 (worker-false-alarms 엔드포인트) | 5 |
+| `dashboard.py` | 수정 (검수자 IN_REVIEW 상세에 작업자 피드백 표시) | 5 |
+| `autoqc-trigger/autoqc_runner.py` | 수정 (determine_final_status 추가) | 5 |
 
 ---
 
