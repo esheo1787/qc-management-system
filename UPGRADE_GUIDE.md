@@ -960,3 +960,56 @@ def test_notification_disabled_no_call(db, monkeypatch):
 ```
 
 이 엔드포인트(`/api/weekly-report`)는 이번 업그레이드 범위에 포함하지 않는다. Phase 1~5 완료 후 별도 작업.
+
+---
+
+## 8. 외부 작업자 지원 (향후)
+
+Phase 1~5는 사무실 내부 환경(NAS + Flask 서버) 기준이다. 외부 프리랜서 작업자가 합류하면 아래를 추가 구현한다.
+
+### 사무실 vs 외부 작업자 비교
+
+| | 사무실 작업자 | 외부 작업자 |
+|---|---|---|
+| 데이터 위치 | NAS (공유 네트워크) | 로컬 PC (USB/VPN으로 전달받음) |
+| Auto-QC 실행 | Flask 서버가 NAS에서 자동 | 작업자 PC에서 CLI로 직접 |
+| 트리거 방식 | 웹 제출 → webhook → Flask | 작업자가 CLI 실행 → API 업로드 |
+| QC 결과 업로드 | Flask → `POST /api/autoqc-summary` | CLI → `POST /api/autoqc-summary` |
+| 알림 수신 | Google Chat (사내) | Google Chat / 이메일 |
+
+### 핵심: 서버 코드 변경 없음
+
+서버 입장에서는 어디서 실행했든 같은 `POST /api/autoqc-summary` API로 동일한 JSON이 들어온다. 사무실/외부를 구분할 필요가 없다.
+
+### 외부 작업자 흐름
+
+```
+외부 작업자: 로컬 PC에서 작업 완료
+    │
+    ▼
+로컬 Auto-QC CLI 실행 → 결과를 웹 서버 API로 업로드
+    │
+    ├─ PASS → IN_REVIEW → 검수자에게 알림
+    │
+    └─ WARN/INCOMPLETE → REWORK → 작업자에게 Google Chat/이메일 알림
+                                      │
+                                작업자가 수정
+                                      │
+                                로컬 Auto-QC CLI 재실행 → 결과 API 업로드
+                                      │
+                                      ├─ PASS → IN_REVIEW → 검수자에게 알림
+                                      └─ WARN → REWORK → 반복
+```
+
+### 추가 구현 항목
+
+1. **Auto-QC CLI 배포 패키지**: `autoqc_cli.py` + 의존성을 zip/installer로 제공
+   ```bash
+   # 외부 작업자 PC에서
+   python autoqc_cli.py --case-id 123 --data-path ./CASE_123 --server https://qc.example.com
+   ```
+2. **외부 접속 인프라**: Cloudflare Tunnel 또는 Tailscale (비용 0원)
+3. **이메일 알림 추가**: Google Chat 외에 이메일 채널 (외부 작업자용)
+4. **데이터 전달 프로세스**: 보안 규정에 따라 USB/VPN/암호화 클라우드 중 결정
+
+이 항목들은 Phase 1~5 완료 후, 외부 작업자 합류 시점에 별도 Phase로 진행한다.
